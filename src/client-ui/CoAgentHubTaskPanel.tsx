@@ -17,7 +17,7 @@ export const TASK_REFRESH_MS = 15_000
 /** Preview lengths for the collapsed summary / expanded brief / output tail. */
 export const SUMMARY_LIMIT = 60
 export const BRIEF_LIMIT = 300
-export const OUTPUT_LIMIT = 2000
+export const OUTPUT_LIMIT = 8000
 
 /** Minimal task shape read from `GET {apiBase}/groups/:id/tasks?includeOutput=1`. */
 export interface CoAgentHubTaskView {
