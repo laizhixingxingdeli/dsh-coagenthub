@@ -140,3 +140,18 @@ npx @deepseek-ai/dsh web --patch .\cordis.yml
 - 全信化模型:身份只认 id,无 token;同名 participant 会冲突,Windows 注册时换一个名字即可。
 - 插件 host 半的代理在 Windows 本地运行(转发到 Mac),浏览器无 CORS 问题;headless 模式(Node 直连)同样可用。
 - Windows 的 dsh 面板/工具与 Mac 网页看到的是同一个 CoAgentHub。
+
+
+## 分工模式:Windows 指挥 Mac 干活(方案 B)
+
+dsh 的工作区是**运行 dsh 的机器本地目录**。Windows 的 dsh 无需访问 Mac 的文件系统:
+
+1. **工作区**:在 Windows 上选任意本地目录(如 `C:\\projects\\dsh-workspace`)——它只是 dsh agent 的本地沙箱,不需要包含 Mac 项目。
+2. **操作 Mac 的 CoAgentHub**:面板(或对话)用工具完成:
+   - 列参与者/群:`coagenthub_list_participants` / `coagenthub_list_groups`
+   - 下发任务给 Mac 执行器:`coagenthub_dispatch_task`(任务书写明项目路径,Mac 上的执行器会在 Mac 本地仓库干活、提交、汇报)
+   - 查进度/结果:`coagenthub_list_tasks` / `coagenthub_get_messages`(含实时输出)
+3. **效果**:Windows dsh = 指挥台;Mac 执行器 = 干活的工人;文件系统互不共享,各自原生性能;任务书/汇报/文件信令全走 CoAgentHub。
+4. 想直接看 Mac 仓库文件时,再用方案 A(SMB 映射)只读浏览。
+
+> 提示:dispatch_task 的任务书应包含目标项目路径(执行器以群绑定的 project_path 为准;多项目时确保群已绑定 Mac 上的正确目录)。
