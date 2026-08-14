@@ -1,7 +1,7 @@
 {
   "name": "@laizhixingxingdeli/dsh-coagenthub",
   "version": "0.0.1",
-  "private": true,
+  "private": false,
   "type": "module",
   "license": "MIT",
   "description": "DeepSeek Harness plugin: operate CoAgentHub (list participants / create groups / post messages / dispatch tasks / query tasks) from the dsh agent via tools.",
@@ -53,5 +53,17 @@
     "react-dom": "^18.3.1",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
+  },
+  "files": [
+    "src",
+    "lib",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laizhixingxingdeli/dsh-coagenthub.git"
   }
 }
