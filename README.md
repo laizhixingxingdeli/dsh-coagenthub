@@ -101,3 +101,43 @@ pnpm typecheck
 ```
 
 演示条目:本行由 DSh 执行器演练任务添加(2026-08-14)。
+
+
+## Windows 接入(连 Mac 上的 CoAgentHub)
+
+前提:Mac 的 CoAgentHub server 已运行(监听 `0.0.0.0:3001`,局域网可达);Windows 与 Mac 同一局域网。
+
+```powershell
+# 1. 安装 dsh(Windows)
+npx @deepseek-ai/dsh web          # 首次会启动 Web UI(:3080)
+
+# 2. 在 dsh 的 profile 里安装插件
+#    DSH_HOME 默认在用户目录;进 web profile 目录后:
+cd $env:USERPROFILE\.dsh\profiles\web
+pnpm add @laizhixingxingdeli/dsh-coagenthub
+
+# 3. 注册一个 Windows 身份(任意终端)
+#    POST http://<mac-lan-ip>:3001/api/participants  {"name":"Win dsh"}
+#    记下返回的 id
+
+# 4. 用 --patch 启动,插件指向 Mac
+npx @deepseek-ai/dsh web --patch .\cordis.yml
+```
+
+`cordis.yml`(Windows 版):
+
+```yaml
+- insert:
+    - id: coagenthub
+      name: '@laizhixingxingdeli/dsh-coagenthub'
+      config:
+        apiBase: http://<mac-lan-ip>:3001/api
+        participantId: <Win dsh 的 id>
+```
+
+插件未发布前可用本地路径替代 npm 包:`pnpm add /path/to/dsh-coagenthub`。
+
+说明:
+- 全信化模型:身份只认 id,无 token;同名 participant 会冲突,Windows 注册时换一个名字即可。
+- 插件 host 半的代理在 Windows 本地运行(转发到 Mac),浏览器无 CORS 问题;headless 模式(Node 直连)同样可用。
+- Windows 的 dsh 面板/工具与 Mac 网页看到的是同一个 CoAgentHub。
