@@ -5,7 +5,8 @@ DeepSeek Harness(`dsh`)插件:把 CoAgentHub(局域网多参与者协作中枢)�
 ## 形态
 
 - **一期:工具集**——dsh agent 通过对话操作 CoAgentHub(列参与者/建群/发消息/下发任务/查任务)
-- **二期:浏览器半**——群列表/任务面板等 React 组件挂到 dsh 三栏 slot(未实现)
+- **二期:浏览器半**——群列表面板挂到 dsh 三栏 slot(未实现)
+- **三期:任务面板**——面板升级为「群列表 | 任务」双 Tab:群列表沿用二期;任务 Tab 选群后展示该群任务全貌(状态徽章/执行器/摘要/attempt 时间线/输出 tail,支持复制任务 id、15s 自动刷新 running 任务)
 
 ## 安装
 
@@ -61,8 +62,24 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
 ```text
 1. coagenthub_create_group(title="我的任务群")
 2. coagenthub_dispatch_task(groupId=<上一步 id>, body="实现登录页", executorName="AtomCode")
-3. coagenthub_list_tasks(groupId=<id>)   # 轮询 status
+3. coagenthub_list_tasks(groupId=<上一步 id>)   # 轮询 status
 ```
+
+## 浏览器半(三期:任务面板)
+
+dsh web 页面右上角悬浮一个 **CoAgentHub 面板**(`shell.overlay` seat,320px):
+
+- **群列表 Tab**:群列表 + 状态,点击行复制群 id。
+- **任务 Tab**:顶部下拉选群(复用群列表数据),下方展示该群任务:状态徽章(排队中=黄、执行中=绿点脉冲、已完成=绿、失败=红、已取消=灰)、执行器、摘要(前 60 字)、相对时间;点击行展开详情(brief 前 300 字、attempt 时间线「第 N 次 失败 exit 1 → 第 2 次 成功 abc1234」、diffSummary error / 输出 tail,均最多 2000 字)。每行可复制任务 id,顶部按钮手动刷新;选中群后每 15s 自动刷新(running 任务实时跟进)。
+- 数据经同源代理 `/coagenthub-api`(host 半 `coagenthub-proxy`)拉取,`GET /groups/:id/tasks?includeOutput=1`。
+
+构建浏览器半 bundle:
+
+```sh
+node scripts/build-client.mjs   # 产出 lib/client.js(dsh web 启动时加载)
+```
+
+验证(需本机 dsh web + CoAgentHub 运行中):打开 `http://localhost:3080`,面板应显示「群列表 | 任务」双 Tab,选群后出现真实任务行。
 
 ## 测试
 

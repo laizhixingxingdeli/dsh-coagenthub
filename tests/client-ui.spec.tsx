@@ -2,17 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { CoAgentHubGroupList, DEFAULT_API_BASE, GROUP_LIST_LIMIT } from '../src/client-ui/CoAgentHubGroupList.tsx'
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
-}
-
-function groups(items: unknown[]): { items: unknown[]; total: number } {
-  return { items, total: items.length }
-}
+import { CoAgentHubPanel, PANEL_TABS } from '../src/client-ui/CoAgentHubPanel.tsx'
+import { groupFetchMock, jsonResponse, groups } from './helpers.ts'
 
 afterEach(() => {
   cleanup()
@@ -93,5 +84,40 @@ describe('CoAgentHubGroupList', () => {
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith('g1')
     })
+  })
+})
+
+describe('CoAgentHubPanel', () => {
+  it('keeps the panel identity and renders the 群列表 tab first', async () => {
+    vi.stubGlobal('fetch', groupFetchMock())
+
+    render(<CoAgentHubPanel />)
+
+    expect(screen.getByLabelText('CoAgentHub 面板')).toBeTruthy()
+    expect(PANEL_TABS.map((t) => t.label)).toEqual(['群列表', '任务'])
+    expect(screen.getByRole('tab', { name: '群列表' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('heading', { name: 'CoAgentHub 群列表' })).toBeTruthy()
+    await waitFor(() => {
+      expect(screen.getByText('dsh-coagenthub 插件开发')).toBeTruthy()
+    })
+  })
+
+  it('switches to the 任务 tab and back', async () => {
+    vi.stubGlobal('fetch', groupFetchMock())
+
+    render(<CoAgentHubPanel />)
+    await waitFor(() => {
+      expect(screen.getByText('dsh-coagenthub 插件开发')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByRole('tab', { name: '任务' }))
+    expect(screen.getByRole('tab', { name: '任务' }).getAttribute('aria-selected')).toBe('true')
+    // 任务面板:群选择下拉 + 未选群时的空态
+    expect(screen.getByLabelText('选择群组')).toBeTruthy()
+    expect(screen.getByText('请选择群组查看任务')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'CoAgentHub 群列表' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: '群列表' }))
+    expect(screen.getByRole('heading', { name: 'CoAgentHub 群列表' })).toBeTruthy()
   })
 })

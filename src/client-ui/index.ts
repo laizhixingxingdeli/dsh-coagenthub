@@ -1,6 +1,6 @@
 /**
- * CoAgentHub plugin, browser half. Registers the group-list panel into the
- * `shell.overlay` seat (ui-layout): the sidebar and details columns are both
+ * CoAgentHub plugin, browser half. Registers the panel (群列表 + 任务 tabs) into
+ * the `shell.overlay` seat (ui-layout): the sidebar and details columns are both
  * single-kind slots with fixed occupants (SidebarRoot / DetailsPanel), so
  * registering there would replace shipped UI; shell.overlay is the list-kind
  * additive seat designed for a frame-wide surface of your own, and its root
@@ -8,7 +8,7 @@
  * @module @laizhixingxingdeli/dsh-coagenthub/client
  */
 
-import { CoAgentHubGroupList } from './CoAgentHubGroupList.tsx'
+import { CoAgentHubPanel } from './CoAgentHubPanel.tsx'
 
 /** Required services: the slot registry the panel registers into. */
 export const inject = ['slots']
@@ -25,13 +25,13 @@ interface ClientContextLike {
 }
 
 /**
- * Client plugin body: register the group-list panel into the shell overlay.
- * `slots.inject` waits on the declaration (ui-layout) before registering, so
- * apply order against ui-layout is irrelevant.
+ * Client plugin body: register the panel (群列表 | 任务 tabs) into the shell
+ * overlay. `slots.inject` waits on the declaration (ui-layout) before
+ * registering, so apply order against ui-layout is irrelevant.
  */
 export function apply(ctx: ClientContextLike): void {
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
-    id: 'coagenthub-groups',
-  }, CoAgentHubGroupList))
+    id: 'coagenthub-panel',
+  }, CoAgentHubPanel))
 }

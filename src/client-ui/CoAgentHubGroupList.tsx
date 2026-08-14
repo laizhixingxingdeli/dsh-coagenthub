@@ -1,7 +1,9 @@
 /**
- * CoAgentHub group-list panel (browser half). Fetches the group list from the
+ * CoAgentHub group-list content (browser half). Fetches the group list from the
  * same-origin proxy route the host half registers (default `/coagenthub-api`),
- * renders title + status per group, and copies a group id on row click.
+ * renders title + status per group, and copies a group id on row click. Mounted
+ * inside the CoAgentHub panel's 群列表 tab (the panel container owns the
+ * floating chrome).
  * @module @laizhixingxingdeli/dsh-coagenthub/client-ui
  */
 
@@ -40,7 +42,7 @@ function statusLabel(status: string): string {
 }
 
 /** Fetch `{apiBase}/groups?limit=…` and normalize into rows, throwing on failure. */
-async function fetchGroups(apiBase: string): Promise<CoAgentHubGroupView[]> {
+export async function fetchGroups(apiBase: string): Promise<CoAgentHubGroupView[]> {
   const response = await fetch(`${apiBase}/groups?limit=${GROUP_LIST_LIMIT}`)
   if (!response.ok) {
     const body = await response.text().catch(() => '')
@@ -83,7 +85,7 @@ export function CoAgentHubGroupList({ apiBase = DEFAULT_API_BASE }: CoAgentHubGr
 
   const groups = state.kind === 'ready' ? state.groups : []
   return (
-    <section className={css.panel} aria-label="CoAgentHub 群列表">
+    <section className={css.content} aria-label="CoAgentHub 群列表">
       <header className={css.header}>
         <div className={css.titleWrap}>
           <h2 className={css.title}>CoAgentHub 群列表</h2>

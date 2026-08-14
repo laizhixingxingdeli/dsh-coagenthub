@@ -1,0 +1,79 @@
+/* CoAgentHub panel container (browser half). Right-side floating panel with a
+   header (title + tab bar) over a scrolling body that hosts the 群列表 / 任务
+   content components. Styled after the dsh DetailsPanel with the dsw theme
+   aliases so dark mode and future theme changes apply. */
+
+.panel {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 100;
+  width: 320px;
+  max-height: min(70vh, 640px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary, #1f2328);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+  font-size: 13px;
+  line-height: 1.4;
+  pointer-events: auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.tab {
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+  background: transparent;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.tab[data-active='true'] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
