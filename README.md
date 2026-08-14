@@ -155,3 +155,17 @@ dsh 的工作区是**运行 dsh 的机器本地目录**。Windows 的 dsh 无需
 4. 想直接看 Mac 仓库文件时,再用方案 A(SMB 映射)只读浏览。
 
 > 提示:dispatch_task 的任务书应包含目标项目路径(执行器以群绑定的 project_path 为准;多项目时确保群已绑定 Mac 上的正确目录)。
+
+
+## 发布节奏(约定)
+
+**先本地/Win 验证,再发 npm。**
+
+1. 功能开发 → 提交推送 GitHub(`main`),**不发布 npm**。
+2. Windows 验证(两种方式):
+   - 本地路径:`git clone` 到 Win 后 `pnpm add D:\\path\\to\\dsh-coagenthub`
+   - 或 Git 直装:`pnpm add git+https://github.com/laizhixingxingdeli/dsh-coagenthub.git`
+3. Win 验证通过后,再由维护者执行 `npm publish`(token 见仓库维护者)。
+4. 紧急修复可直接发版,但常规迭代遵循上述节奏。
+
+> 发布命令:`npm publish --registry https://registry.npmjs.org --//registry.npmjs.org/:_authToken=$NPM_TOKEN`
