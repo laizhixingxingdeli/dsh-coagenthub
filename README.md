@@ -100,9 +100,6 @@ pnpm test
 pnpm typecheck
 ```
 
-演示条目:本行由 DSh 执行器演练任务添加(2026-08-14)。
-
-
 ## Windows 接入(连 Mac 上的 CoAgentHub)
 
 前提:Mac 的 CoAgentHub server 已运行(监听 `0.0.0.0:3001`,局域网可达);Windows 与 Mac 同一局域网。
