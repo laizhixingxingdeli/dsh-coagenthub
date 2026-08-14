@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { CoAgentHubGroupList, DEFAULT_API_BASE, GROUP_LIST_LIMIT } from '../src/client-ui/CoAgentHubGroupList.tsx'
 import { CoAgentHubPanel, PANEL_TABS } from '../src/client-ui/CoAgentHubPanel.tsx'
+import { ACTIVE_GROUP_STORAGE_KEY, saveActiveGroupId } from '../src/client-ui/workspace-status.ts'
 import { groupFetchMock, jsonResponse, groups } from './helpers.ts'
 
 afterEach(() => {
   cleanup()
+  localStorage.clear()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
@@ -151,5 +153,96 @@ describe('CoAgentHubPanel', () => {
     expect(screen.getByLabelText('CoAgentHub 地址')).toBeTruthy()
     expect(screen.getByLabelText('participantId')).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'CoAgentHub 群列表' })).toBeNull()
+  })
+})
+
+describe('CoAgentHubPanel 当前工作区 dropdown', () => {
+  /** URL-routed fetch mock: groups / workspace-status / settings config. */
+  function workspacePanelFetchMock(workspaces: unknown[]) {
+    return vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/groups?')) {
+        return Promise.resolve(jsonResponse(groups([
+          { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+        ])))
+      }
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({
+          mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' },
+          workspaces,
+        }))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+  }
+
+  const PROJECTION = {
+    groupId: 'g1',
+    groupTitle: 'dsh-coagenthub 插件开发',
+    macPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
+    winPath: 'Z:\\dsh-coagenthub',
+    pathExists: true,
+    registered: true,
+  }
+
+  it('renders the virtual workspace projections as options', async () => {
+    vi.stubGlobal('fetch', workspacePanelFetchMock([PROJECTION]))
+
+    render(<CoAgentHubPanel />)
+
+    const select = (await screen.findByLabelText('当前工作区')) as HTMLSelectElement
+    await waitFor(() => {
+      expect(select.querySelectorAll('option')).toHaveLength(2)
+    })
+    expect(select.textContent).toContain('dsh-coagenthub 插件开发')
+    expect(select.textContent).toContain('Z:\\dsh-coagenthub')
+  })
+
+  it('persists the selection to localStorage and mirrors it to the host settings', async () => {
+    const fetchMock = workspacePanelFetchMock([PROJECTION])
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubPanel />)
+
+    const select = (await screen.findByLabelText('当前工作区')) as HTMLSelectElement
+    await waitFor(() => {
+      expect(select.querySelectorAll('option')).toHaveLength(2)
+    })
+    fireEvent.change(select, { target: { value: 'g1' } })
+
+    await waitFor(() => {
+      expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBe('g1')
+    })
+    expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activeGroupId: 'g1' }),
+    }))
+  })
+
+  it('defaults the 任务 tab group selection to the active workspace', async () => {
+    localStorage.setItem(ACTIVE_GROUP_STORAGE_KEY, 'g1')
+    vi.stubGlobal('fetch', workspacePanelFetchMock([PROJECTION]))
+
+    render(<CoAgentHubPanel />)
+
+    fireEvent.click(screen.getByRole('tab', { name: '任务' }))
+    await waitFor(() => {
+      expect((screen.getByLabelText('选择群组') as HTMLSelectElement).value).toBe('g1')
+    })
+  })
+})
+
+describe('workspace selection helpers', () => {
+  it('clears the host mirror with an empty string when deselected', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, settings: {} }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await saveActiveGroupId(null)
+
+    expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activeGroupId: '' }),
+    }))
   })
 })

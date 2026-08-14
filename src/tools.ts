@@ -10,6 +10,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { CoAgentHubClient } from './client.ts'
 import type { Message, Participant } from './client.ts'
+import type { CoAgentHubSettingsStore } from './config.ts'
 
 const DEFAULT_EXECUTOR_NAME = 'AtomCode'
 
@@ -133,8 +134,11 @@ const TASK_VIEW_SCHEMA = {
   },
 } as const
 
-/** Build the six CoAgentHub tool definitions against one client. */
-export function createCoAgentHubTools(client: CoAgentHubClient): ToolDefinition[] {
+/** Build the seven CoAgentHub tool definitions against one client. */
+export function createCoAgentHubTools(
+  client: CoAgentHubClient,
+  settingsStore?: CoAgentHubSettingsStore,
+): ToolDefinition[] {
   return [
     defineTool({
       name: 'coagenthub_list_participants',
@@ -277,12 +281,46 @@ export function createCoAgentHubTools(client: CoAgentHubClient): ToolDefinition[
           .map(messageView)
       },
     }),
+
+    defineTool({
+      name: 'coagenthub_get_active_group',
+      description:
+        'Return the currently selected CoAgentHub virtual workspace (the group chosen in the panel 当前工作区 dropdown) as { groupId, groupTitle }; null when nothing is selected. Useful to scope a task or message to the user\'s active group.',
+      parameters: {},
+      output: {
+        schema: {
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                groupId: { type: 'string', required: true },
+                groupTitle: { type: 'string', required: true },
+              },
+            },
+            { type: 'null' },
+          ],
+        } as const,
+        render: renderValue,
+      },
+      async execute() {
+        const activeGroupId = settingsStore?.get().activeGroupId
+        if (activeGroupId === undefined || activeGroupId.trim() === '') return null
+        const groups = await client.listGroups(100)
+        const group = groups.items.find(candidate => candidate.id === activeGroupId)
+        return group === undefined ? null : { groupId: group.id, groupTitle: group.title }
+      },
+    }),
   ]
 }
 
-/** Register the six CoAgentHub tools on a dsh tools runtime. */
-export function registerCoAgentHubTools(ctx: Context, client: CoAgentHubClient): () => void {
-  const disposers = createCoAgentHubTools(client).map(definition => ctx.tools.register(definition))
+/** Register the seven CoAgentHub tools on a dsh tools runtime. */
+export function registerCoAgentHubTools(
+  ctx: Context,
+  client: CoAgentHubClient,
+  settingsStore?: CoAgentHubSettingsStore,
+): () => void {
+  const disposers = createCoAgentHubTools(client, settingsStore).map(definition => ctx.tools.register(definition))
   return () => {
     for (const dispose of disposers) dispose()
   }

@@ -39,6 +39,8 @@ export interface Group {
   createdAt: string
   updatedAt: string
   memberCount: number
+  /** Mac-side project path when the group is bound to a repo; absent otherwise. */
+  projectPath?: string | null
 }
 
 export interface GroupList {

@@ -5,7 +5,15 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { CoAgentHubSettingsStore, defaultConfigFilePath } from '../src/config.ts'
-import { apply, SETTINGS_PATH, handleSettings } from '../src/proxy.ts'
+import {
+  apply,
+  handleWorkspaceRoute,
+  SETTINGS_PATH,
+  WORKSPACE_SETUP_PATH,
+  WORKSPACE_STATUS_PATH,
+  handleSettings,
+} from '../src/proxy.ts'
+import type { WorkspaceRegistryLike, WorkspaceRouteDeps } from '../src/workspace.ts'
 
 interface FakeRes {
   statusCode: number
@@ -94,6 +102,25 @@ describe('CoAgentHubSettingsStore', () => {
     store.set({ apiBase: 'http://x:1/api', participantId: 'abc' })
     store.set({ apiBase: '', participantId: '' })
     expect(store.get()).toEqual({})
+  })
+
+  it('drops malformed mappingRule / activeGroupId values instead of throwing', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    const malformed = { apiBase: 'http://x:1/api' } as unknown as Record<string, unknown>
+    store.set({ ...malformed, mappingRule: null } as never)
+    store.set({ ...malformed, mappingRule: {} } as never)
+    store.set({ ...malformed, mappingRule: { macPrefix: 123, winPrefix: 'Z:\\' } } as never)
+    store.set({ ...malformed, activeGroupId: null } as never)
+    expect(store.get()).toEqual({ apiBase: 'http://x:1/api' })
+  })
+
+  it('persists mappingRule and activeGroupId and reloads them', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' }, activeGroupId: 'g1' })
+    expect(store.get()).toEqual({
+      mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' },
+      activeGroupId: 'g1',
+    })
   })
 })
 
@@ -231,5 +258,144 @@ describe('raw task output endpoint (host)', () => {
     await handler(makeReq('GET', '/coagenthub-api/raw/t1'), res as unknown as ServerResponse)
     expect(res.statusCode).toBe(404)
     expect(res.body).toContain('暂无完整输出')
+  })
+})
+
+function workspaceDeps(overrides: Partial<WorkspaceRouteDeps> = {}): WorkspaceRouteDeps {
+  const store = new CoAgentHubSettingsStore(null)
+  const registry: WorkspaceRegistryLike = {
+    create: vi.fn().mockResolvedValue({ id: 'w1', path: 'Z:\\dsh-coagenthub', title: 'x' }),
+    list: vi.fn().mockReturnValue([]),
+  }
+  return {
+    getPlatform: () => 'win32',
+    getApiBase: () => 'http://192.168.31.92:3001/api',
+    runNetUse: vi.fn().mockResolvedValue('ok'),
+    pathExists: async path => path === 'Z:\\dsh-coagenthub',
+    getRegistry: () => registry,
+    store,
+    listGroups: async () => [
+      { id: 'g1', title: 'dsh-coagenthub 插件开发', projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub' },
+      { id: 'g2', title: '无目录', projectPath: '/Users/apple/Desktop/Projects/ghost' },
+    ],
+    ...overrides,
+  }
+}
+
+describe('workspace endpoints (host)', () => {
+  it('POST workspace-setup runs the full flow: rule persisted, mapped + failures', async () => {
+    const deps = workspaceDeps()
+    const res = makeRes()
+    await handleWorkspaceRoute(
+      makeReq('POST', WORKSPACE_SETUP_PATH, JSON.stringify({ shareName: 'Projects' })),
+      res as unknown as ServerResponse,
+      deps,
+    )
+
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body).toEqual({
+      ok: true,
+      mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' },
+      mapped: [{ groupTitle: 'dsh-coagenthub 插件开发', winPath: 'Z:\\dsh-coagenthub', registered: true }],
+      failures: [{ groupTitle: '无目录', winPath: 'Z:\\ghost', reason: '路径不存在或不可访问' }],
+    })
+    expect(deps.runNetUse).toHaveBeenCalledWith(['use', 'Z:', '\\\\192.168.31.92\\Projects', '/persistent:yes'])
+    expect(deps.store.get().mappingRule).toEqual({ macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' })
+  })
+
+  it('is idempotent through the handler: repeated setup does not re-register', async () => {
+    const setTitle = vi.fn().mockResolvedValue(undefined)
+    const deps = workspaceDeps({
+      getRegistry: () => ({
+        create: vi.fn(),
+        list: vi.fn().mockReturnValue([{ id: 'w1', path: 'Z:\\dsh-coagenthub', title: '旧标题', setTitle }]),
+      }),
+    })
+    const res = makeRes()
+    await handleWorkspaceRoute(
+      makeReq('POST', WORKSPACE_SETUP_PATH, JSON.stringify({ shareName: 'Projects' })),
+      res as unknown as ServerResponse,
+      deps,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body).mapped).toHaveLength(1)
+    expect(JSON.parse(res.body).failures).toHaveLength(1)
+    expect(deps.getRegistry()!.create).not.toHaveBeenCalled()
+    expect(setTitle).toHaveBeenCalledWith('dsh-coagenthub 插件开发')
+  })
+
+  it('rejects workspace-setup on non-Windows with 400', async () => {
+    const deps = workspaceDeps({ getPlatform: () => 'darwin' })
+    const res = makeRes()
+    await handleWorkspaceRoute(
+      makeReq('POST', WORKSPACE_SETUP_PATH, JSON.stringify({ shareName: 'Projects' })),
+      res as unknown as ServerResponse,
+      deps,
+    )
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body)).toMatchObject({ error: expect.stringContaining('仅 Windows') })
+  })
+
+  it('rejects a non-POST workspace-setup with 405', async () => {
+    const deps = workspaceDeps()
+    const res = makeRes()
+    await handleWorkspaceRoute(makeReq('GET', WORKSPACE_SETUP_PATH), res as unknown as ServerResponse, deps)
+    expect(res.statusCode).toBe(405)
+  })
+
+  it('rejects an invalid workspace-setup body with 400', async () => {
+    const deps = workspaceDeps()
+    const res = makeRes()
+    await handleWorkspaceRoute(
+      makeReq('POST', WORKSPACE_SETUP_PATH, '{not-json'),
+      res as unknown as ServerResponse,
+      deps,
+    )
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body)).toMatchObject({ error: expect.stringContaining('invalid JSON') })
+  })
+
+  it('GET workspace-status reports the rule and per-group state', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' } })
+    const deps = workspaceDeps({
+      store,
+      getRegistry: () => ({
+        create: vi.fn(),
+        list: vi.fn().mockReturnValue([{ id: 'w1', path: 'Z:\\dsh-coagenthub', title: 'x' }]),
+      }),
+    })
+    const res = makeRes()
+    await handleWorkspaceRoute(makeReq('GET', WORKSPACE_STATUS_PATH), res as unknown as ServerResponse, deps)
+
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.body)
+    expect(body.mappingRule).toEqual({ macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' })
+    expect(body.workspaces[0]).toEqual({
+      groupId: 'g1',
+      groupTitle: 'dsh-coagenthub 插件开发',
+      macPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
+      winPath: 'Z:\\dsh-coagenthub',
+      pathExists: true,
+      registered: true,
+    })
+    expect(body.workspaces[1]!.registered).toBe(false)
+  })
+
+  it('intercepts workspace routes before forwarding upstream', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    const upstream = vi.fn()
+    vi.stubGlobal('fetch', upstream)
+
+    const { handler } = captureHandler({}, store)
+    const res = makeRes()
+    await handler(
+      makeReq('POST', '/coagenthub-api/workspace-setup', JSON.stringify({ shareName: 'Projects' })),
+      res as unknown as ServerResponse,
+    )
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body)).toMatchObject({ error: expect.stringContaining('仅 Windows') })
+    expect(upstream).not.toHaveBeenCalled()
   })
 })

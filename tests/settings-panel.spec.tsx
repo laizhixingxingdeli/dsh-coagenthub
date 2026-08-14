@@ -2,10 +2,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { CoAgentHubSettings, SETTINGS_PATH, fetchSettings, saveSettings } from '../src/client-ui/CoAgentHubSettings.tsx'
+import { WORKSPACE_SETUP_PATH } from '../src/client-ui/workspace-status.ts'
 import { jsonResponse } from './helpers.ts'
+
+/** jsdom 默认非 Windows;测试里改过 navigator.platform 后要还原。 */
+const NON_WINDOWS_PLATFORM = 'Linux x86_64'
 
 afterEach(() => {
   cleanup()
+  Object.defineProperty(navigator, 'platform', { value: NON_WINDOWS_PLATFORM, configurable: true })
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
@@ -98,6 +103,102 @@ describe('CoAgentHubSettings helpers', () => {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ apiBase: 'http://a:1/api' }),
+    })
+  })
+})
+
+describe('CoAgentHubSettings 虚拟工作区 section', () => {
+  it('shows the mapping rule and the registered count', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({
+          mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' },
+          workspaces: [
+            {
+              groupId: 'g1',
+              groupTitle: 'dsh-coagenthub 插件开发',
+              macPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
+              winPath: 'Z:\\dsh-coagenthub',
+              pathExists: true,
+              registered: true,
+            },
+          ],
+        }))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubSettings />)
+
+    expect(await screen.findByText('/Users/apple/Desktop/Projects/ → Z:\\')).toBeTruthy()
+    expect(screen.getByText('已注册 1/1 个虚拟工作区')).toBeTruthy()
+  })
+
+  it('disables the one-click button and notes Windows-only on non-Windows', async () => {
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({})))
+
+    render(<CoAgentHubSettings />)
+
+    expect(await screen.findByText('自动映射仅 Windows 支持')).toBeTruthy()
+    expect((screen.getByRole('button', { name: '一键设置' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('submits the one-click setup form and shows the result', async () => {
+    Object.defineProperty(navigator, 'platform', { value: 'Win32', configurable: true })
+    const setupResult = {
+      ok: true,
+      mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' },
+      mapped: [{ groupTitle: 'dsh-coagenthub 插件开发', winPath: 'Z:\\dsh-coagenthub', registered: true }],
+      failures: [{ groupTitle: '无目录', winPath: 'Z:\\ghost', reason: '路径不存在或不可访问' }],
+    }
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/workspace-setup')) return Promise.resolve(jsonResponse(setupResult))
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({ mappingRule: null, workspaces: [] }))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubSettings />)
+    await screen.findByLabelText('共享名')
+
+    fireEvent.change(screen.getByLabelText('共享名'), { target: { value: 'Projects' } })
+    fireEvent.change(screen.getByLabelText('盘符'), { target: { value: 'Y' } })
+    fireEvent.click(screen.getByRole('button', { name: '一键设置' }))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(WORKSPACE_SETUP_PATH, expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shareName: 'Projects', driveLetter: 'Y' }),
+      }))
+    })
+    expect(await screen.findByText('设置完成:注册 1 个,失败 1 个')).toBeTruthy()
+    expect(screen.getByText('无目录:路径不存在或不可访问')).toBeTruthy()
+  })
+
+  it('shows the setup error from the host as an alert', async () => {
+    Object.defineProperty(navigator, 'platform', { value: 'Win32', configurable: true })
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/workspace-setup')) {
+        return Promise.resolve(jsonResponse({ error: '未配置有效的 CoAgentHub 地址(apiBase)' }, 400))
+      }
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({ mappingRule: null, workspaces: [] }))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubSettings />)
+    await screen.findByLabelText('共享名')
+    fireEvent.click(screen.getByRole('button', { name: '一键设置' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toContain('设置失败:未配置有效的 CoAgentHub 地址(apiBase)')
     })
   })
 })

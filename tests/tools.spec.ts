@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { CoAgentHubClient } from '../src/client.ts'
+import { CoAgentHubSettingsStore } from '../src/config.ts'
 import { createCoAgentHubTools, registerCoAgentHubTools } from '../src/tools.ts'
 
 const EXPECTED_TOOL_NAMES = [
@@ -11,6 +12,7 @@ const EXPECTED_TOOL_NAMES = [
   'coagenthub_dispatch_task',
   'coagenthub_list_tasks',
   'coagenthub_get_messages',
+  'coagenthub_get_active_group',
 ] as const
 
 function participant(overrides: Partial<{ id: string; name: string; device: string | null; lastSeen: string | null }>) {
@@ -48,7 +50,7 @@ afterEach(() => {
 })
 
 describe('createCoAgentHubTools', () => {
-  it('defines exactly the six expected tools', () => {
+  it('defines exactly the seven expected tools', () => {
     const client = clientWith(() => Promise.resolve([]))
     const tools = createCoAgentHubTools(client)
     expect(tools.map(tool => tool.name)).toEqual(EXPECTED_TOOL_NAMES)
@@ -179,5 +181,29 @@ describe('createCoAgentHubTools', () => {
     const client = clientWith(() => Promise.resolve([]))
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_list_tasks')!
     await expect(execute(tool, {})).rejects.toThrow('groupId is required')
+  })
+
+  it('get_active_group returns null when nothing is selected', async () => {
+    const client = clientWith(() => Promise.resolve({ items: [], total: 0 }))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_active_group')!
+    expect(await execute(tool, {})).toBeNull()
+  })
+
+  it('get_active_group resolves the stored selection to groupId + title', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g1' })
+    const client = clientWith(() =>
+      Promise.resolve({ items: [{ id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' }], total: 1 }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    expect(await execute(tool, {})).toEqual({ groupId: 'g1', groupTitle: 'dsh-coagenthub 插件开发' })
+  })
+
+  it('get_active_group returns null when the stored group no longer exists', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'ghost' })
+    const client = clientWith(() => Promise.resolve({ items: [], total: 0 }))
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    expect(await execute(tool, {})).toBeNull()
   })
 })

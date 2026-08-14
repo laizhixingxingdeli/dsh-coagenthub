@@ -23,7 +23,7 @@ export interface CoAgentHubPluginConfig {
   participantId?: string
 }
 
-/** Register the six CoAgentHub tools against a shared client. */
+/** Register the seven CoAgentHub tools against a shared client. */
 export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   const client = new CoAgentHubClient({
     baseURL: config.apiBase,
@@ -31,5 +31,5 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     // Share the proxy's settings store so panel saves also steer the tools.
     settingsStore: getCoAgentHubSettingsStore(),
   })
-  ctx.effect(() => registerCoAgentHubTools(ctx, client), 'coagenthub.tools()')
+  ctx.effect(() => registerCoAgentHubTools(ctx, client, getCoAgentHubSettingsStore()), 'coagenthub.tools()')
 }

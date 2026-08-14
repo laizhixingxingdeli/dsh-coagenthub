@@ -12,7 +12,15 @@ import css from './CoAgentHubPanel.module.css'
 import { CoAgentHubGroupList, DEFAULT_API_BASE } from './CoAgentHubGroupList.tsx'
 import { CoAgentHubTaskPanel } from './CoAgentHubTaskPanel.tsx'
 import { CoAgentHubExecutorsPanel } from './CoAgentHubExecutorsPanel.tsx'
-import { CoAgentHubSettings } from './CoAgentHubSettings.tsx'
+import { CoAgentHubSettings, fetchSettings } from './CoAgentHubSettings.tsx'
+import {
+  fetchWorkspaceStatus,
+  isWindowsPlatform,
+  readActiveGroupId,
+  saveActiveGroupId,
+  writeActiveGroupId,
+  type WorkspaceStatusView,
+} from './workspace-status.ts'
 
 /** Panel tabs: group list, task panel, executor management, and settings. */
 export type CoAgentHubTab = 'groups' | 'tasks' | 'executors' | 'settings'
@@ -67,6 +75,41 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
   const sizeRef = useRef(size)
   sizeRef.current = size
   const resizeStart = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+
+  // 当前虚拟工作区:localStorage 记住;host 设置镜像让 agent 侧工具可读。
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(() => readActiveGroupId())
+  const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceStatusView | null>(null)
+
+  // 加载群投影状态;保存设置后(reloadKey)重新拉取,映射规则变化能反映到下拉。
+  useEffect(() => {
+    let alive = true
+    fetchWorkspaceStatus().then(
+      (view) => { if (alive) setWorkspaceStatus(view) },
+      () => { if (alive) setWorkspaceStatus(null) },
+    )
+    const saved = readActiveGroupId()
+    if (saved !== null) {
+      setActiveGroupId(saved)
+    } else {
+      fetchSettings().then(
+        (settings) => {
+          if (alive && settings.activeGroupId !== undefined && settings.activeGroupId !== '') {
+            setActiveGroupId(settings.activeGroupId)
+          }
+        },
+        () => {},
+      )
+    }
+    return () => { alive = false }
+  }, [reloadKey])
+
+  const handleWorkspaceChange = (event: React.ChangeEvent<HTMLSelectElement>): void => {
+    const next = event.target.value === '' ? null : event.target.value
+    setActiveGroupId(next)
+    writeActiveGroupId(next)
+    // host 镜像失败只影响 agent 侧工具,不阻塞本次选择。
+    void saveActiveGroupId(next).catch(() => {})
+  }
 
   // 拖拽调整大小:pointerdown 记录起点,pointermove 更新,pointerup 结束并持久化。
   const onResizePointerDown = useCallback((e: React.PointerEvent) => {
@@ -125,12 +168,31 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
           ))}
         </div>
       </header>
+      <div className={css.workspaceBar}>
+        <label className={css.workspaceLabel} htmlFor="coagenthub-workspace-select">当前工作区</label>
+        <select
+          id="coagenthub-workspace-select"
+          className={css.workspaceSelect}
+          value={activeGroupId ?? ''}
+          onChange={handleWorkspaceChange}
+          aria-label="当前工作区"
+        >
+          <option value="">未选择</option>
+          {(workspaceStatus?.workspaces ?? []).map((workspace) => (
+            <option key={workspace.groupId} value={workspace.groupId}>
+              {workspace.groupTitle}({workspace.winPath ?? workspace.macPath})
+            </option>
+          ))}
+        </select>
+        {!isWindowsPlatform() && <span className={css.workspaceNote}>自动映射仅 Windows 支持</span>}
+      </div>
       <div className={css.body}>
         {tab === 'groups' && <CoAgentHubGroupList key={`groups-${reloadKey}`} apiBase={apiBase} />}
         {tab === 'tasks' && (
           <CoAgentHubTaskPanel
             key={`tasks-${reloadKey}`}
             apiBase={apiBase}
+            defaultGroupId={activeGroupId ?? undefined}
             onDetailChange={setTaskDetailOpen}
           />
         )}

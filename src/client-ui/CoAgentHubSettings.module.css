@@ -87,3 +87,72 @@
   font-size: 12px;
   color: var(--dsw-alias-label-error, #cf222e);
 }
+
+/* 虚拟工作区:映射规则状态 + 一键设置表单。 */
+.wsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.wsTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.wsStatus {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wsRule {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.wsMeta {
+  margin: 0;
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.wsNote {
+  margin: 0;
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.wsError {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-error, #cf222e);
+}
+
+.wsForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wsResult {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wsOk {
+  margin: 0;
+  font-size: 12px;
+  color: #1a7f37;
+}
+
+.wsFailures {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+}

@@ -55,6 +55,8 @@ export interface CoAgentHubTaskPanelProps {
   apiBase?: string
   /** Reports whether a task detail is expanded so the panel can widen. */
   onDetailChange?: (open: boolean) => void
+  /** 当前虚拟工作区对应的群;非空时任务面板默认选中它。 */
+  defaultGroupId?: string
 }
 
 type LoadState =
@@ -203,7 +205,7 @@ export function highlightTerm(line: string, term: string, keyPrefix: string): Re
  * then the selected group's tasks with a detail expansion area. Auto-refreshes
  * while a group is selected; the header 刷新 button forces a reload.
  */
-export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange }: CoAgentHubTaskPanelProps) {
+export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange, defaultGroupId }: CoAgentHubTaskPanelProps) {
   const [groups, setGroups] = useState<CoAgentHubGroupView[]>([])
   const [groupsError, setGroupsError] = useState<string | null>(null)
   const [groupId, setGroupId] = useState('')
@@ -227,6 +229,14 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
     )
     return () => { alive = false }
   }, [apiBase])
+
+  // 虚拟工作区选中变化时默认切换群选择;用户手动选择不被覆盖。
+  useEffect(() => {
+    if (defaultGroupId !== undefined && defaultGroupId !== '' && defaultGroupId !== groupId) {
+      setGroupId(defaultGroupId)
+    }
+    // 仅跟随 defaultGroupId 变化,避免与用户手动选择互相覆盖。
+  }, [defaultGroupId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load the selected group's tasks; `tick` drives manual + auto refresh.
   useEffect(() => {

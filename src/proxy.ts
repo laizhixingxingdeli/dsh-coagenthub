@@ -19,6 +19,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { CoAgentHubClient } from './client.ts'
 import { getCoAgentHubSettingsStore, type CoAgentHubSettings, type CoAgentHubSettingsStore } from './config.ts'
+import {
+  buildWorkspaceStatus,
+  defaultNetUse,
+  defaultPathExists,
+  runWorkspaceSetup,
+  WorkspaceSetupError,
+  type WorkspaceRegistryLike,
+  type WorkspaceRouteDeps,
+  type WorkspaceSetupInput,
+} from './workspace.ts'
 
 /** Minimal structural face of the dsh webserver route registry (host service). */
 interface WebServerLike {
@@ -33,6 +43,8 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     /** The dsh host webserver route registry (provided by @deepseek-ai/dsh-host-webserver). */
     webServer: WebServerLike
+    /** The dsh workspace registry service (provided by @deepseek-ai/dsh-workspace). */
+    workspaceRegistry?: WorkspaceRegistryLike
   }
 }
 
@@ -91,7 +103,12 @@ export async function handleSettings(
     let patch: CoAgentHubSettings
     try {
       const parsed = JSON.parse(await readRequestBody(req)) as Partial<CoAgentHubSettings>
-      patch = { apiBase: parsed.apiBase, participantId: parsed.participantId }
+      patch = {
+        apiBase: parsed.apiBase,
+        participantId: parsed.participantId,
+        mappingRule: parsed.mappingRule,
+        activeGroupId: parsed.activeGroupId,
+      }
     } catch {
       json(res, 400, { error: 'invalid JSON body' })
       return
@@ -164,6 +181,69 @@ export async function handleRawOutput(
   }
 }
 
+/** Same-origin workspace-setup route (POST, never forwarded upstream). */
+export const WORKSPACE_SETUP_PATH = `${PROXY_PATH}/workspace-setup`
+
+/** Same-origin workspace-status route (GET, never forwarded upstream). */
+export const WORKSPACE_STATUS_PATH = `${PROXY_PATH}/workspace-status`
+
+/**
+ * Route the two workspace endpoints of `/coagenthub-api` (never forwarded
+ * upstream): `POST workspace-setup` runs the one-click Windows setup, `GET
+ * workspace-status` reports the mapping rule plus the per-group state.
+ */
+export async function handleWorkspaceRoute(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: WorkspaceRouteDeps,
+): Promise<void> {
+  const url = new URL(req.url ?? '/', 'http://localhost')
+  if (url.pathname === WORKSPACE_SETUP_PATH) {
+    if (req.method !== 'POST') {
+      json(res, 405, { error: `method ${req.method} not allowed` })
+      return
+    }
+    let input: WorkspaceSetupInput
+    try {
+      const parsed = JSON.parse(await readRequestBody(req)) as WorkspaceSetupInput
+      input = {
+        shareName: parsed.shareName,
+        macUser: parsed.macUser,
+        macPassword: parsed.macPassword,
+        driveLetter: parsed.driveLetter,
+      }
+    } catch {
+      json(res, 400, { error: 'invalid JSON body' })
+      return
+    }
+    try {
+      const result = await runWorkspaceSetup(input, deps)
+      json(res, 200, result)
+    } catch (error) {
+      if (error instanceof WorkspaceSetupError) {
+        json(res, error.status, { error: error.message })
+        return
+      }
+      json(res, 502, { error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+  if (url.pathname === WORKSPACE_STATUS_PATH) {
+    if (req.method !== 'GET') {
+      json(res, 405, { error: `method ${req.method} not allowed` })
+      return
+    }
+    try {
+      const status = await buildWorkspaceStatus(deps)
+      json(res, 200, status)
+    } catch (error) {
+      json(res, 502, { error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+  json(res, 404, { error: `unknown workspace route ${url.pathname}` })
+}
+
 /**
  * Register the same-origin routes the browser half fetches. The web page
  * cannot call the CoAgentHub API cross-origin (it sends no
@@ -187,6 +267,18 @@ export function apply(
     let dispose: (() => void) | undefined
     void ctx.inject(['webServer'], (webCtx) => {
       console.log('[coagenthub-proxy] webServer available, registering proxy', PROXY_PATH)
+      // Workspace endpoints resolve the dsh registry lazily per request, so a
+      // profile without the workspaceRegistry service still gets the proxy and
+      // the settings routes (workspace endpoints degrade to 503 for setup).
+      const workspaceDeps: WorkspaceRouteDeps = {
+        getPlatform: () => process.platform,
+        getApiBase: () => client.baseURL,
+        runNetUse: defaultNetUse,
+        pathExists: defaultPathExists,
+        getRegistry: () => webCtx.workspaceRegistry ?? null,
+        store: settingsStore,
+        listGroups: () => client.listGroups(100).then(result => result.items),
+      }
       // Settings endpoint is NOT under the /coagenthub-api prefix (no trailing
       // segment), so it needs its own exact route to reach the handler.
       const disposeSettings = webCtx.webServer.register({
@@ -202,6 +294,10 @@ export function apply(
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         console.log('[coagenthub-proxy] proxying', req.url)
         const url = new URL(req.url ?? '/', 'http://localhost')
+        if (url.pathname === WORKSPACE_SETUP_PATH || url.pathname === WORKSPACE_STATUS_PATH) {
+          await handleWorkspaceRoute(req, res, workspaceDeps)
+          return
+        }
         if (url.pathname.startsWith(`${PROXY_PATH}/raw/`)) {
           await handleRawOutput(req, res, client)
           return
