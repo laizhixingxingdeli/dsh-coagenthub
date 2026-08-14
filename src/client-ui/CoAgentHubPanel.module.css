@@ -8,8 +8,10 @@
   top: 16px;
   right: 16px;
   z-index: 100;
-  width: 320px;
-  max-height: min(70vh, 640px);
+  width: var(--panel-width, 360px);
+  height: var(--panel-height, 620px);
+  max-width: 640px;
+  max-height: 90vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -21,7 +23,6 @@
   font-size: 13px;
   line-height: 1.4;
   pointer-events: auto;
-  transition: width 0.18s ease;
 }
 
 /* A task detail is expanded: widen the panel instead of opening a new surface. */
@@ -82,4 +83,24 @@
   min-height: 0;
   flex: 1;
   overflow: hidden;
+}
+
+/* 右下角拖拽手柄:16px 方形,悬停显示斜线光标;overlay 点击穿透区需 pointer-events:auto。 */
+.resizeHandle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  pointer-events: auto;
+  border-bottom-right-radius: 12px;
+  background: linear-gradient(135deg, transparent 50%, var(--dsw-alias-border-l3, rgba(128,128,128,.4)) 50%);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.panel:hover .resizeHandle,
+.resizeHandle:active {
+  opacity: 1;
 }

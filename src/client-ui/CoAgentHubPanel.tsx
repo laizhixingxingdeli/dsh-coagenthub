@@ -7,7 +7,7 @@
  * @module @laizhixingxingdeli/dsh-coagenthub/client-ui
  */
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import css from './CoAgentHubPanel.module.css'
 import { CoAgentHubGroupList, DEFAULT_API_BASE } from './CoAgentHubGroupList.tsx'
 import { CoAgentHubTaskPanel } from './CoAgentHubTaskPanel.tsx'
@@ -36,10 +36,64 @@ export const PANEL_TABS: ReadonlyArray<{ id: CoAgentHubTab; label: string }> = [
  * the active content component. Keeps `aria-label="CoAgentHub 面板"` (phase-2
  * panel identity) so the overlay seat exposes a single labeled surface.
  */
+const PANEL_SIZE_KEY = 'coagenthub.panelSize'
+const DEFAULT_SIZE = { width: 360, height: 620 }
+const MIN_SIZE = { width: 280, height: 320 }
+const MAX_SIZE = { width: 640, height: 900 }
+
+function readSavedSize(): { width: number; height: number } {
+  try {
+    const raw = localStorage.getItem(PANEL_SIZE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as { width?: number; height?: number }
+      if (typeof parsed.width === 'number' && typeof parsed.height === 'number') {
+        return {
+          width: Math.min(MAX_SIZE.width, Math.max(MIN_SIZE.width, parsed.width)),
+          height: Math.min(MAX_SIZE.height, Math.max(MIN_SIZE.height, parsed.height)),
+        }
+      }
+    }
+  } catch {
+    // localStorage 不可用或数据损坏:回落默认尺寸。
+  }
+  return DEFAULT_SIZE
+}
+
 export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelProps) {
   const [tab, setTab] = useState<CoAgentHubTab>('groups')
   const [taskDetailOpen, setTaskDetailOpen] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
+  const [size, setSize] = useState(readSavedSize)
+  const sizeRef = useRef(size)
+  sizeRef.current = size
+  const resizeStart = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+
+  // 拖拽调整大小:pointerdown 记录起点,pointermove 更新,pointerup 结束并持久化。
+  const onResizePointerDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    resizeStart.current = { x: e.clientX, y: e.clientY, w: size.width, h: size.height }
+    const onMove = (ev: PointerEvent) => {
+      if (!resizeStart.current) return
+      const { x, y, w, h } = resizeStart.current
+      const nextW = Math.min(MAX_SIZE.width, Math.max(MIN_SIZE.width, w + (ev.clientX - x)))
+      const nextH = Math.min(MAX_SIZE.height, Math.max(MIN_SIZE.height, h + (ev.clientY - y)))
+      setSize({ width: nextW, height: nextH })
+      sizeRef.current = { width: nextW, height: nextH }
+    }
+    const onUp = () => {
+      resizeStart.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      try {
+        // 用 ref 里的最新尺寸保存(state 更新是异步的,闭包里的 size 已过期)。
+        localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify(sizeRef.current))
+      } catch {
+        // 持久化失败不影响本次调整。
+      }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [size])
 
   // The task panel unmounts on tab switch; reset the widened-panel flag.
   useEffect(() => {
@@ -51,6 +105,7 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
       className={css.panel}
       data-detail-open={taskDetailOpen || undefined}
       aria-label="CoAgentHub 面板"
+      style={{ width: size.width, height: size.height }}
     >
       <header className={css.header}>
         <h2 className={css.title}>CoAgentHub</h2>
@@ -82,6 +137,14 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
         {tab === 'executors' && <CoAgentHubExecutorsPanel key={`executors-${reloadKey}`} apiBase={apiBase} />}
         {tab === 'settings' && <CoAgentHubSettings onSaved={() => setReloadKey((v) => v + 1)} />}
       </div>
+      {/* 右下角拖拽手柄(pointer-events:auto,避开 overlay 点击穿透) */}
+      <div
+        className={css.resizeHandle}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="调整面板大小"
+        onPointerDown={onResizePointerDown}
+      />
     </section>
   )
 }
