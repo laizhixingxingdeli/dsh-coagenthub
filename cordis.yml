@@ -17,3 +17,10 @@
       config:
         apiBase: http://localhost:3001/api
         # participantId: <your uuid>
+
+    # Web-only: same-origin proxy for the browser half (headless ignores it,
+    # because the headless profile has no `webServer` service).
+    - id: coagenthub-proxy
+      name: '@laizhixingxingdeli/dsh-coagenthub/proxy'
+      config:
+        apiBase: http://localhost:3001/api

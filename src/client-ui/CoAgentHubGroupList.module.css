@@ -1,0 +1,104 @@
+/* CoAgentHub group-list panel, mounted into the shell.overlay seat. The
+   overlay layer is click-through by default; the panel opts back into
+   pointer events so rows can be clicked to copy a group id. */
+
+.panel {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 100;
+  width: 280px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--ds-border-color, rgba(128, 128, 128, 0.35));
+  border-radius: 10px;
+  background: var(--ds-surface-color, #ffffff);
+  color: var(--ds-text-color, #1f2328);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+  pointer-events: auto;
+  overflow-y: auto;
+}
+
+.heading {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 0;
+  color: var(--ds-text-secondary-color, rgba(31, 35, 40, 0.6));
+  font-size: 12px;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--ds-hover-color, rgba(128, 128, 128, 0.12));
+}
+
+.row[data-copied='true'] {
+  border-color: var(--ds-accent-color, #4c8bf5);
+}
+
+.title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.status[data-state='active'] {
+  color: #1a7f37;
+  background: rgba(26, 127, 55, 0.12);
+}
+
+.status[data-state='archived'] {
+  color: rgba(31, 35, 40, 0.55);
+  background: rgba(128, 128, 128, 0.14);
+}
+
+.empty,
+.error,
+.loading {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--ds-text-secondary-color, rgba(31, 35, 40, 0.6));
+}
+
+.error {
+  color: #cf222e;
+}

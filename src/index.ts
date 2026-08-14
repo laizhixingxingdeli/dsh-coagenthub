@@ -12,7 +12,7 @@ import { registerCoAgentHubTools } from './tools.ts'
 /** Cordis function-plugin name. */
 export const name = 'coagenthub'
 
-/** Services required before this plugin can register its tools. */
+/** Services required before the CoAgentHub tools can register. */
 export const inject = ['tools']
 
 export interface CoAgentHubPluginConfig {

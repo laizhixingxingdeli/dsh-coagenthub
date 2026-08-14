@@ -1,0 +1,95 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { CoAgentHubGroupList, DEFAULT_API_BASE, GROUP_LIST_LIMIT } from '../src/client-ui/CoAgentHubGroupList.tsx'
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function groups(items: unknown[]): { items: unknown[]; total: number } {
+  return { items, total: items.length }
+}
+
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+describe('CoAgentHubGroupList', () => {
+  it('fetches the group list on mount and renders title + status per row', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(groups([
+      { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+      { id: 'g2', title: 'dsh 实测-0814', status: 'archived' },
+    ])))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubGroupList />)
+
+    expect(fetchMock).toHaveBeenCalledWith(`${DEFAULT_API_BASE}/groups?limit=${GROUP_LIST_LIMIT}`)
+    expect(screen.getByRole('heading', { name: 'CoAgentHub 群列表' })).toBeTruthy()
+    await waitFor(() => {
+      expect(screen.getByText('dsh-coagenthub 插件开发')).toBeTruthy()
+    })
+    expect(screen.getByText('dsh 实测-0814')).toBeTruthy()
+    expect(screen.getByText('进行中')).toBeTruthy()
+    expect(screen.getByText('已归档')).toBeTruthy()
+  })
+
+  it('renders the empty state when the API returns no groups', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(groups([]))))
+
+    render(<CoAgentHubGroupList />)
+
+    await waitFor(() => {
+      expect(screen.getByText('暂无群组')).toBeTruthy()
+    })
+    expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('renders an error summary when the fetch fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    render(<CoAgentHubGroupList />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe('加载失败:Failed to fetch')
+    })
+    expect(screen.queryByText('暂无群组')).toBeNull()
+  })
+
+  it('renders the loading state before the fetch settles', async () => {
+    let resolveFetch: (value: Response) => void = () => {}
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { resolveFetch = resolve })))
+
+    render(<CoAgentHubGroupList />)
+
+    expect(screen.getByText('加载中…')).toBeTruthy()
+    resolveFetch(jsonResponse(groups([{ id: 'g1', title: 'dsh 实测-0814', status: 'active' }])))
+    await waitFor(() => {
+      expect(screen.queryByText('加载中…')).toBeNull()
+    })
+    expect(screen.getByText('dsh 实测-0814')).toBeTruthy()
+  })
+
+  it('copies the group id when a row is clicked', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(groups([
+      { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+    ]))))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    render(<CoAgentHubGroupList />)
+
+    const row = await screen.findByRole('button', { name: /dsh-coagenthub 插件开发/ })
+    fireEvent.click(row)
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith('g1')
+    })
+  })
+})
