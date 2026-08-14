@@ -169,3 +169,14 @@ dsh 的工作区是**运行 dsh 的机器本地目录**。Windows 的 dsh 无需
 4. 紧急修复可直接发版,但常规迭代遵循上述节奏。
 
 > 发布命令:`npm publish --registry https://registry.npmjs.org --//registry.npmjs.org/:_authToken=$NPM_TOKEN`
+
+
+## 虚拟工作区(Windows 一键设置)
+
+每个绑定 project_path 的群自动成为一个「虚拟工作区」。Windows 上可在面板「设置 → 虚拟工作区」一键配置:
+
+1. 填 Mac 共享名(如 Projects)+ 可选账号/密码 + 盘符(默认 Z)
+2. 插件自动:net use 映射网络驱动器 → 推断 Mac→Win 路径规则 → 把群注册为 dsh 工作区
+3. dsh 工作区选择器出现「群名」,选中即锁定该群(面板同步)
+
+前置:Mac 需开启文件共享(SMB),Win 首次需 Mac 共享凭据。
