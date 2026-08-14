@@ -222,7 +222,7 @@ describe('CoAgentHubTaskPanel helpers', () => {
   })
 
   it('caps free-text details at 8000 chars', () => {
-    const long = 'o'.repeat(3000)
+    const long = 'o'.repeat(9000)
     expect(capOutput(long).length).toBe(8001)
     expect(capOutput('  short  ')).toBe('short')
     expect(capOutput(null)).toBe('')
