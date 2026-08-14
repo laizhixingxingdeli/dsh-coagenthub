@@ -171,3 +171,14 @@
   text-align: left;
   font-size: 12px;
 }
+
+/* 群绑定的项目路径(Mac 侧绝对路径;Win 用户据此对应网络映射)。 */
+.path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-dimmed);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

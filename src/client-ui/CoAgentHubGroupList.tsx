@@ -21,6 +21,7 @@ export interface CoAgentHubGroupView {
   id: string
   title: string
   status: string
+  projectPath?: string | null
 }
 
 /** Panel props: only the API base is configurable; everything else is framework-injected. */
@@ -125,6 +126,11 @@ export function CoAgentHubGroupList({ apiBase = DEFAULT_API_BASE }: CoAgentHubGr
                       <span className={css.dot} data-state={group.status} />
                       <span className={css.statusText}>{statusLabel(group.status)}</span>
                     </span>
+                    {group.projectPath && (
+                      <span className={css.path} title={group.projectPath}>
+                        {group.projectPath}
+                      </span>
+                    )}
                   </span>
                   {copiedId === group.id && <span className={css.copied}>已复制</span>}
                 </button>
