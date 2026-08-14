@@ -1,0 +1,19 @@
+# PATCH OVERLAY: enable the CoAgentHub tools plugin on the dsh web profile.
+#
+# Usage:
+#   dsh web --patch cordis.yml
+#
+# This file is a patch overlay over the web profile (dsh-base + dsh-web-app
+# bundle layers), not a tree. `dsh web --patch` applies it as one more sibling
+# patch list at the same include level, so the tools become available to the
+# agent alongside the built-in bundle.
+#
+# Optional plugin config: apiBase / participantId (see README for the
+# environment-variable equivalents).
+
+- insert:
+    - id: coagenthub
+      name: '@laizhixingxingdeli/dsh-coagenthub'
+      config:
+        apiBase: http://localhost:3001/api
+        # participantId: <your uuid>

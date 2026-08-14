@@ -3,5 +3,38 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "license": "MIT"
+  "license": "MIT",
+  "description": "DeepSeek Harness plugin: operate CoAgentHub (list participants / create groups / post messages / dispatch tasks / query tasks) from the dsh agent via tools.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts",
+    "./tools": "./src/tools.ts",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "smoke": "cross-env COAGENTHUB_SMOKE=1 vitest run tests/smoke.spec.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@types/node": "^22.10.0",
+    "cross-env": "^7.0.3",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
 }

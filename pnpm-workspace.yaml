@@ -1,0 +1,4 @@
+allowBuilds:
+  esbuild: true
+# rc 包发布不足 1 天,pnpm 11 默认 minimumReleaseAge=1440 会拒绝,这里放宽为 0
+minimumReleaseAge: 0
