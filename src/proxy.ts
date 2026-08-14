@@ -187,16 +187,21 @@ export function apply(
     let dispose: (() => void) | undefined
     void ctx.inject(['webServer'], (webCtx) => {
       console.log('[coagenthub-proxy] webServer available, registering proxy', PROXY_PATH)
+      // Settings endpoint is NOT under the /coagenthub-api prefix (no trailing
+      // segment), so it needs its own exact route to reach the handler.
+      const disposeSettings = webCtx.webServer.register({
+        kind: 'exact',
+        path: SETTINGS_PATH,
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          await handleSettings(req, res, settingsStore)
+        },
+      })
       dispose = webCtx.webServer.register({
       kind: 'prefix',
       path: PROXY_PATH,
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         console.log('[coagenthub-proxy] proxying', req.url)
         const url = new URL(req.url ?? '/', 'http://localhost')
-        if (url.pathname === SETTINGS_PATH) {
-          await handleSettings(req, res, settingsStore)
-          return
-        }
         if (url.pathname.startsWith(`${PROXY_PATH}/raw/`)) {
           await handleRawOutput(req, res, client)
           return
@@ -223,6 +228,8 @@ export function apply(
         }
       },
       })
+      const prevDispose = dispose
+      dispose = () => { prevDispose?.(); disposeSettings() }
     })
     return () => { dispose?.() }
   }, 'coagenthub.proxy()')

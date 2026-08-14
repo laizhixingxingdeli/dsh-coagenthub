@@ -143,10 +143,12 @@ describe('proxy forward target (dynamic settings)', () => {
     expect(upstream).toHaveBeenLastCalledWith('http://localhost:3001/api/groups?limit=1', expect.anything())
 
     // 保存新地址 → 下一请求转发到新 base + 携带 participantId
+    // (settings 端点现为独立 exact 路由,不走 proxy handler;这里直接调 handleSettings)
     res = makeRes()
-    await handler(
+    await handleSettings(
       makeReq('PUT', SETTINGS_PATH, JSON.stringify({ apiBase: 'http://192.168.31.92:3001/api', participantId: 'p-9' })),
       res as unknown as ServerResponse,
+      store,
     )
     expect(JSON.parse(res.body).ok).toBe(true)
 
@@ -159,7 +161,11 @@ describe('proxy forward target (dynamic settings)', () => {
 
     // 改回(模拟实测中的「不可达地址改回」) → 目标随之切换
     res = makeRes()
-    await handler(makeReq('PUT', SETTINGS_PATH, JSON.stringify({ apiBase: 'http://127.0.0.1:3999/api' })), res as unknown as ServerResponse)
+    await handleSettings(
+      makeReq('PUT', SETTINGS_PATH, JSON.stringify({ apiBase: 'http://127.0.0.1:3999/api' })),
+      res as unknown as ServerResponse,
+      store,
+    )
     res = makeRes()
     await handler(makeReq('GET', '/coagenthub-api/participants'), res as unknown as ServerResponse)
     expect(upstream).toHaveBeenLastCalledWith('http://127.0.0.1:3999/api/participants', expect.anything())
