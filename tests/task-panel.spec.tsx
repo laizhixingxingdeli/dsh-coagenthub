@@ -115,9 +115,9 @@ describe('CoAgentHubTaskPanel', () => {
     expect(screen.getByText(/exit 1: build failed/)).toBeTruthy()
     // 展开详情中的 brief 摘要(前 300 字)可见
     expect(screen.getByText(/带超长摘要/)).toBeTruthy()
-    // 输出 tail 超长截断到 2000 字
+    // 输出 tail 超长截断到 8000 字
     const output = screen.getByText(/tail-line-1/)
-    expect(output.textContent?.length).toBeLessThanOrEqual(2001)
+    expect(output.textContent?.length).toBeLessThanOrEqual(8001)
 
     fireEvent.click(row)
     expect(screen.queryByText('第 1 次 失败 exit 1 → 第 2 次 已完成 abc1234')).toBeNull()
@@ -221,9 +221,9 @@ describe('CoAgentHubTaskPanel helpers', () => {
     expect(timeline).toBe('第 1 次 失败 exit 1 → 第 2 次 已完成 abc1234')
   })
 
-  it('caps free-text details at 2000 chars', () => {
+  it('caps free-text details at 8000 chars', () => {
     const long = 'o'.repeat(3000)
-    expect(capOutput(long).length).toBe(2001)
+    expect(capOutput(long).length).toBe(8001)
     expect(capOutput('  short  ')).toBe('short')
     expect(capOutput(null)).toBe('')
   })
