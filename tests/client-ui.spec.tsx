@@ -48,7 +48,9 @@ describe('CoAgentHubGroupList', () => {
     await waitFor(() => {
       expect(screen.getByText('暂无群组')).toBeTruthy()
     })
-    expect(screen.queryByRole('button')).toBeNull()
+    // 空态没有列表行,但 header 的刷新按钮存在
+    expect(screen.queryByRole('button', { name: '刷新' })).toBeTruthy()
+    expect(screen.queryAllByRole('button', { name: /复制/ })).toHaveLength(0)
   })
 
   it('renders an error summary when the fetch fails', async () => {

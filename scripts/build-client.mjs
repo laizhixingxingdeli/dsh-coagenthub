@@ -36,7 +36,9 @@ const cssModulePlugin = {
       const classMap = {}
       const css = source.replace(/\.([_a-zA-Z][\w-]*)/g, (match, local) => {
         const hash = createHash('sha1').update(`${args.path}:${local}`).digest('hex').slice(0, 8)
-        classMap[local] = `${hash}_${local}`
+        // 类名必须以字母开头:数字开头(如 5e…)会被 CSS tokenizer 当作
+        // 科学计数法,导致整个选择器非法、规则被浏览器丢弃。
+        classMap[local] = `c${hash}_${local}`
         return `.${classMap[local]}`
       })
       const tagId = `${PKG_ID}/${basename(args.path)}`

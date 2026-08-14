@@ -57,6 +57,7 @@ async function fetchGroups(apiBase: string): Promise<CoAgentHubGroupView[]> {
 export function CoAgentHubGroupList({ apiBase = DEFAULT_API_BASE }: CoAgentHubGroupListProps) {
   const [state, setState] = useState<LoadState>({ kind: 'loading' })
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [tick, setTick] = useState(0)
 
   useEffect(() => {
     let alive = true
@@ -72,7 +73,7 @@ export function CoAgentHubGroupList({ apiBase = DEFAULT_API_BASE }: CoAgentHubGr
     return () => {
       alive = false
     }
-  }, [apiBase])
+  }, [apiBase, tick])
 
   const copyId = (id: string): void => {
     const clipboard = navigator.clipboard
@@ -80,37 +81,56 @@ export function CoAgentHubGroupList({ apiBase = DEFAULT_API_BASE }: CoAgentHubGr
     void clipboard.writeText(id).then(() => setCopiedId(id)).catch(() => {})
   }
 
+  const groups = state.kind === 'ready' ? state.groups : []
   return (
     <section className={css.panel} aria-label="CoAgentHub 群列表">
-      <h2 className={css.heading}>CoAgentHub 群列表</h2>
-      <p className={css.hint}>点击行复制群 id</p>
-      {state.kind === 'loading' && <p className={css.loading}>加载中…</p>}
-      {state.kind === 'error' && (
-        <p className={css.error} role="alert">加载失败:{state.message}</p>
-      )}
-      {state.kind === 'ready' && state.groups.length === 0 && (
-        <p className={css.empty}>暂无群组</p>
-      )}
-      {state.kind === 'ready' && state.groups.length > 0 && (
-        <ul className={css.list}>
-          {state.groups.map((group) => (
-            <li key={group.id}>
-              <button
-                type="button"
-                className={css.row}
-                data-copied={copiedId === group.id || undefined}
-                onClick={() => copyId(group.id)}
-                title={group.id}
-              >
-                <span className={css.title}>{group.title}</span>
-                <span className={css.status} data-state={group.status}>
-                  {statusLabel(group.status)}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+      <header className={css.header}>
+        <div className={css.titleWrap}>
+          <h2 className={css.title}>CoAgentHub 群列表</h2>
+          {state.kind === 'ready' && <span className={css.count}>{groups.length}</span>}
+        </div>
+        <button
+          type="button"
+          className={css.refresh}
+          onClick={() => setTick((v) => v + 1)}
+          title="刷新"
+        >
+          刷新
+        </button>
+      </header>
+      <div className={css.body}>
+        {state.kind === 'loading' && <p className={css.loading}>加载中…</p>}
+        {state.kind === 'error' && (
+          <p className={css.error} role="alert">加载失败:{state.message}</p>
+        )}
+        {state.kind === 'ready' && groups.length === 0 && (
+          <p className={css.empty}>暂无群组</p>
+        )}
+        {state.kind === 'ready' && groups.length > 0 && (
+          <ul className={css.list}>
+            {groups.map((group) => (
+              <li key={group.id}>
+                <button
+                  type="button"
+                  className={css.row}
+                  data-copied={copiedId === group.id || undefined}
+                  onClick={() => copyId(group.id)}
+                  title={`${group.id}（点击复制）`}
+                >
+                  <span className={css.rowMain}>
+                    <span className={css.title}>{group.title}</span>
+                    <span className={css.meta}>
+                      <span className={css.dot} data-state={group.status} />
+                      <span className={css.statusText}>{statusLabel(group.status)}</span>
+                    </span>
+                  </span>
+                  {copiedId === group.id && <span className={css.copied}>已复制</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </section>
   )
 }
