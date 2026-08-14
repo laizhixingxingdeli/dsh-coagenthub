@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   CoAgentHubTaskPanel,
   TASK_REFRESH_MS,
   attemptTimeline,
   capOutput,
   formatUpdatedAt,
+  parseFinalReport,
+  rawOutputUrl,
   statusLabel,
   type CoAgentHubTaskView,
 } from '../src/client-ui/CoAgentHubTaskPanel.tsx'
@@ -85,13 +87,13 @@ describe('CoAgentHubTaskPanel', () => {
     expect(runningBadge.querySelector('[class*="pulse"]')).toBeTruthy()
   })
 
-  it('expands a row into attempt timeline + diff output tail', async () => {
+  it('expands a row into 任务书 + attempt timeline + final report + terminal output', async () => {
     const withAttempts = task({
       id: 't1',
       status: 'failed',
       brief: '实现登录页(带超长摘要,用于验证展开详情中的摘要截断)'.repeat(3),
       diffSummary: {
-        summary: '登录页失败',
+        summary: '提交: abc123456789\n测试: 12 passed\n汇报: 登录页失败原因已修复\n遗留: 无',
         hash: 'abc123456789',
         error: 'exit 1: build failed',
         outputTail: 'tail-line-1\ntail-line-2\n'.repeat(400),
@@ -111,16 +113,129 @@ describe('CoAgentHubTaskPanel', () => {
     fireEvent.click(row)
 
     expect(row.getAttribute('aria-expanded')).toBe('true')
-    expect(screen.getByText('第 1 次 失败 exit 1 → 第 2 次 已完成 abc1234')).toBeTruthy()
-    expect(screen.getByText(/exit 1: build failed/)).toBeTruthy()
-    // 展开详情中的 brief 摘要(前 300 字)可见
-    expect(screen.getByText(/带超长摘要/)).toBeTruthy()
+    const detail = screen.getByTestId('task-detail')
+    // 时间线节点:第 N 次 + 状态 + 原因 + 短提交
+    expect(within(detail).getByText('第 1 次')).toBeTruthy()
+    expect(within(detail).getByText('第 2 次')).toBeTruthy()
+    expect(within(detail).getByText('已完成')).toBeTruthy()
+    expect(within(detail).getByText('exit 1')).toBeTruthy()
+    expect(within(detail).getByText('abc1234')).toBeTruthy()
+    // 失败原因
+    expect(within(detail).getByText(/exit 1: build failed/)).toBeTruthy()
+    // 最终汇报:提交/测试/汇报/遗留 各段
+    expect(within(detail).getByText('12 passed')).toBeTruthy()
+    expect(within(detail).getByText(/登录页失败原因已修复/)).toBeTruthy()
+    // 展开详情中的 brief 摘要(前 400 字)可见
+    expect(within(detail).getByText(/带超长摘要/)).toBeTruthy()
     // 输出 tail 超长截断到 8000 字
-    const output = screen.getByText(/tail-line-1/)
+    const output = within(detail).getByLabelText('过程输出')
     expect(output.textContent?.length).toBeLessThanOrEqual(8001)
 
     fireEvent.click(row)
-    expect(screen.queryByText('第 1 次 失败 exit 1 → 第 2 次 已完成 abc1234')).toBeNull()
+    expect(screen.queryByText('第 1 次')).toBeNull()
+  })
+
+  it('opens the full output in a new browser tab via the raw proxy route', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+    vi.stubGlobal('fetch', groupFetchMock([task({ id: 'task-42' })]))
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    fireEvent.click(await screen.findByRole('button', { name: /实现登录页/ }))
+
+    fireEvent.click(screen.getByRole('button', { name: '打开完整输出' }))
+
+    expect(openSpy).toHaveBeenCalledWith(rawOutputUrl(DEFAULT_API_BASE, 'task-42'), '_blank', 'noopener')
+  })
+
+  it('filters the terminal output with the search box and highlights matches', async () => {
+    const withOutput = task({
+      diffSummary: { summary: '', hash: null, error: null, outputTail: 'line-alpha-1\nline-beta-2\nline-alpha-3' },
+    })
+    vi.stubGlobal('fetch', groupFetchMock([withOutput]))
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    fireEvent.click(await screen.findByRole('button', { name: /实现登录页/ }))
+
+    const detail = screen.getByTestId('task-detail')
+    fireEvent.change(within(detail).getByLabelText('搜索输出'), { target: { value: 'alpha' } })
+
+    // 命中行保留、未命中行被过滤(文本被 mark 拆分,用 textContent 断言)
+    const terminal = within(detail).getByLabelText('过程输出')
+    expect(terminal.textContent).toContain('line-alpha-1')
+    expect(terminal.textContent).toContain('line-alpha-3')
+    expect(terminal.textContent).not.toContain('line-beta-2')
+    // 命中以 <mark> 高亮
+    expect(within(detail).getAllByText('alpha')).toHaveLength(2)
+  })
+
+  it('toggles the terminal follow-scroll button', async () => {
+    vi.stubGlobal('fetch', groupFetchMock([task({ diffSummary: { summary: '', hash: null, error: null, outputTail: 'some log' } })]))
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    fireEvent.click(await screen.findByRole('button', { name: /实现登录页/ }))
+
+    const follow = screen.getByRole('button', { name: '跟随滚动' })
+    expect(follow.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(follow)
+    expect(follow.getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('expands the full brief beyond the 400-char preview', async () => {
+    const longBrief = '长任务书内容'.repeat(100)
+    vi.stubGlobal('fetch', groupFetchMock([task({ brief: longBrief })]))
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    fireEvent.click(await screen.findByRole('button', { name: /长任务书内容/ }))
+
+    const detail = screen.getByTestId('task-detail')
+    expect(within(detail).getByText(/长任务书内容/).textContent?.length).toBe(401)
+    fireEvent.click(within(detail).getByRole('button', { name: '展开全文' }))
+    expect(within(detail).getByText(/长任务书内容/).textContent?.length).toBe(600)
+    fireEvent.click(within(detail).getByRole('button', { name: '收起' }))
+    expect(within(detail).getByText(/长任务书内容/).textContent?.length).toBe(401)
+  })
+
+  it('renders the final report sections parsed from the diffSummary summary', async () => {
+    const withReport = task({
+      diffSummary: {
+        summary: '提交: a1b2c3d\n测试: 12 passed\n汇报: 完成登录页\n遗留: 无',
+        hash: 'abcdef123456',
+        error: null,
+        outputTail: null,
+      },
+    })
+    vi.stubGlobal('fetch', groupFetchMock([withReport]))
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    fireEvent.click(await screen.findByRole('button', { name: /提交: a1b2c3d/ }))
+
+    const detail = screen.getByTestId('task-detail')
+    expect(within(detail).getByText('提交')).toBeTruthy()
+    expect(within(detail).getByText('测试')).toBeTruthy()
+    expect(within(detail).getByText('汇报')).toBeTruthy()
+    expect(within(detail).getByText('遗留')).toBeTruthy()
+    expect(within(detail).getByText('a1b2c3d')).toBeTruthy()
+    expect(within(detail).getByText('12 passed')).toBeTruthy()
+    expect(within(detail).getByText('完成登录页')).toBeTruthy()
+    expect(within(detail).getByText('无')).toBeTruthy()
+  })
+
+  it('reports the detail-open state so the panel container can widen', async () => {
+    const onDetailChange = vi.fn()
+    vi.stubGlobal('fetch', groupFetchMock([task()]))
+
+    render(<CoAgentHubTaskPanel onDetailChange={onDetailChange} />)
+    await selectGroup('g1')
+    fireEvent.click(await screen.findByRole('button', { name: /实现登录页/ }))
+    await waitFor(() => expect(onDetailChange).toHaveBeenLastCalledWith(true))
+
+    fireEvent.click(screen.getByRole('button', { name: /实现登录页/ }))
+    await waitFor(() => expect(onDetailChange).toHaveBeenLastCalledWith(false))
   })
 
   it('renders the empty state for a group without tasks', async () => {
@@ -233,5 +348,22 @@ describe('CoAgentHubTaskPanel helpers', () => {
     expect(formatUpdatedAt('2026-08-14T11:59:40Z', now)).toBe('刚刚')
     expect(formatUpdatedAt('2026-08-14T11:50:00Z', now)).toBe('10 分钟前')
     expect(formatUpdatedAt('2026-08-14T10:00:00Z', now)).toBe('2 小时前')
+  })
+
+  it('parses the final report sections from diffSummary summary lines', () => {
+    expect(parseFinalReport('提交: xyz\n测试: 5 passed\n汇报: ok\n遗留: 无', 'abcdef123456')).toEqual({
+      提交: 'xyz',
+      测试: '5 passed',
+      汇报: 'ok',
+      遗留: '无',
+    })
+    // 无标签行时整体作为汇报;提交回退到短 hash
+    expect(parseFinalReport('plain summary text', 'abcdef123456')).toEqual({
+      提交: 'abcdef1',
+      测试: null,
+      汇报: 'plain summary text',
+      遗留: null,
+    })
+    expect(parseFinalReport(null, null)).toEqual({ 提交: null, 测试: null, 汇报: null, 遗留: null })
   })
 })

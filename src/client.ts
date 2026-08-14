@@ -4,6 +4,8 @@
  * @module @laizhixingxingdeli/dsh-coagenthub/client
  */
 
+import type { CoAgentHubSettingsStore } from './config.ts'
+
 export const DEFAULT_API_BASE = 'http://localhost:3001/api'
 
 export const REQUEST_TIMEOUT_MS = 10_000
@@ -13,6 +15,11 @@ export interface CoAgentHubOptions {
   baseURL?: string
   /** Participant identity sent as `X-Participant-Id`; absent means no header. */
   participantId?: string
+  /**
+   * Runtime settings store; its values take precedence over `baseURL` /
+   * `participantId` (设置 > 插件 config > 环境变量 > 默认), read per request.
+   */
+  settingsStore?: CoAgentHubSettingsStore
 }
 
 export interface Participant {
@@ -60,6 +67,14 @@ export interface PostMessageInput {
   audienceRef?: string
 }
 
+export interface TaskDiffSummary {
+  summary: string | null
+  hash: string | null
+  error: string | null
+  /** Process output tail; only present when the tasks were fetched with includeOutput=1. */
+  outputTail?: string | null
+}
+
 export interface Task {
   id: string
   groupId: string
@@ -70,7 +85,7 @@ export interface Task {
   status: string
   checkpointRef: string | null
   retryCount: number
-  diffSummary: string | null
+  diffSummary: TaskDiffSummary | null
   createdAt: string
   updatedAt: string
 }
@@ -106,12 +121,30 @@ function summarizeBody(body: string): string {
 }
 
 export class CoAgentHubClient {
-  readonly baseURL: string
-  readonly participantId?: string
+  private readonly configuredBaseURL?: string
+  private readonly configuredParticipantId?: string
+  private readonly settingsStore?: CoAgentHubSettingsStore
 
   constructor(options: CoAgentHubOptions = {}) {
-    this.baseURL = (options.baseURL ?? process.env.COAGENTHUB_API_BASE ?? DEFAULT_API_BASE).replace(/\/+$/, '')
-    this.participantId = options.participantId ?? process.env.COAGENTHUB_PARTICIPANT_ID
+    this.configuredBaseURL = options.baseURL
+    this.configuredParticipantId = options.participantId
+    this.settingsStore = options.settingsStore
+  }
+
+  /** Effective base URL, resolved per request: 设置 > config > env > default. */
+  get baseURL(): string {
+    const fromSettings = this.settingsStore?.get().apiBase
+    const base = fromSettings ?? this.configuredBaseURL ?? process.env.COAGENTHUB_API_BASE ?? DEFAULT_API_BASE
+    return base.replace(/\/+$/, '')
+  }
+
+  /** Effective participant id, resolved per request: 设置 > config > env. */
+  get participantId(): string | undefined {
+    return (
+      this.settingsStore?.get().participantId
+      ?? this.configuredParticipantId
+      ?? process.env.COAGENTHUB_PARTICIPANT_ID
+    )
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -168,8 +201,9 @@ export class CoAgentHubClient {
     return this.request<Message[]>(`/groups/${encodeURIComponent(groupId)}/messages`)
   }
 
-  listTasks(groupId: string): Promise<Task[]> {
-    return this.request<Task[]>(`/groups/${encodeURIComponent(groupId)}/tasks`)
+  listTasks(groupId: string, includeOutput = false): Promise<Task[]> {
+    const query = includeOutput ? '?includeOutput=1' : ''
+    return this.request<Task[]>(`/groups/${encodeURIComponent(groupId)}/tasks${query}`)
   }
 
   async getParticipantByName(name: string): Promise<Participant | undefined> {

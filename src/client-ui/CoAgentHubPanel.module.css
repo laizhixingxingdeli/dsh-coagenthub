@@ -21,6 +21,12 @@
   font-size: 13px;
   line-height: 1.4;
   pointer-events: auto;
+  transition: width 0.18s ease;
+}
+
+/* A task detail is expanded: widen the panel instead of opening a new surface. */
+.panel[data-detail-open='true'] {
+  width: 480px;
 }
 
 .header {

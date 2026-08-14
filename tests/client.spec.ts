@@ -6,6 +6,7 @@ import {
   DEFAULT_API_BASE,
   REQUEST_TIMEOUT_MS,
 } from '../src/client.ts'
+import { CoAgentHubSettingsStore } from '../src/config.ts'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -124,5 +125,47 @@ describe('CoAgentHubClient', () => {
       if (previous === undefined) delete process.env.COAGENTHUB_API_BASE
       else process.env.COAGENTHUB_API_BASE = previous
     }
+  })
+
+  it('prefers the settings store over config and env (设置 > config > env)', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ apiBase: 'http://settings.test:3001/api' })
+    const previous = process.env.COAGENTHUB_API_BASE
+    process.env.COAGENTHUB_API_BASE = 'http://env.test:3001/api'
+    try {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse([]))
+      vi.stubGlobal('fetch', fetchMock)
+      const client = new CoAgentHubClient({ baseURL: 'http://config.test:3001/api', settingsStore: store })
+      await client.listParticipants()
+      const [url] = fetchMock.mock.calls[0] as [string]
+      expect(url).toBe('http://settings.test:3001/api/participants')
+    } finally {
+      if (previous === undefined) delete process.env.COAGENTHUB_API_BASE
+      else process.env.COAGENTHUB_API_BASE = previous
+    }
+  })
+
+  it('reads the participant id from the settings store', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ participantId: 'from-store' })
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse([]))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient({ settingsStore: store })
+    await client.listParticipants()
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(new Headers(init.headers).get('X-Participant-Id')).toBe('from-store')
+  })
+
+  it('listTasks appends includeOutput=1 only when requested', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse([])))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    await client.listTasks('g1')
+    expect(fetchMock.mock.calls[0]![0]).toBe(`${DEFAULT_API_BASE}/groups/g1/tasks`)
+    await client.listTasks('g1', true)
+    expect(fetchMock.mock.calls[1]![0]).toBe(`${DEFAULT_API_BASE}/groups/g1/tasks?includeOutput=1`)
   })
 })

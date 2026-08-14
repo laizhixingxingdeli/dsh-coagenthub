@@ -1,7 +1,8 @@
 /* CoAgentHub task panel (browser half). Fills the 任务 tab of the CoAgentHub
-   panel: a group selector toolbar over a scrolling task list, with expandable
-   rows (attempt timeline + diff output). Uses the dsw theme aliases so dark
-   mode and future theme changes apply. */
+   panel: a group selector toolbar over a scrolling task list, with a detail
+   expansion area (任务书 / attempt timeline / final report / terminal output)
+   that widens the panel. Uses the dsw theme aliases so dark mode and future
+   theme changes apply. */
 
 .content {
   display: flex;
@@ -181,15 +182,38 @@
   white-space: nowrap;
 }
 
-.rowActions {
+/* ---- Detail expansion area ---- */
+
+.detail {
+  margin: 2px 6px 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-subtle, rgba(128, 128, 128, 0.06));
+  font-size: 12px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 6px;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.copyId {
+.detailHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detailHeader .executor {
+  max-width: none;
+}
+
+.detailActions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.action {
   flex: none;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 6px;
@@ -201,39 +225,177 @@
   cursor: pointer;
 }
 
-.copyId:hover {
+.action:hover {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-.copyId[data-copied='true'] {
+.action[data-copied='true'] {
   color: var(--dsw-alias-brand-primary);
   border-color: var(--dsw-alias-brand-primary);
 }
 
-.detail {
-  margin: 2px 6px 6px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-subtle, rgba(128, 128, 128, 0.06));
-  font-size: 12px;
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-caption);
 }
 
 .detailBrief {
-  margin: 0 0 6px;
+  margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.detailAttempts {
-  margin: 0 0 6px;
+.textToggle {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--dsw-alias-brand-primary);
+  cursor: pointer;
+}
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.timelineItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.timelineNode {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-dimmed);
+}
+
+.timelineNode[data-ok='true'] {
+  background: #1a7f37;
+}
+
+.timelineNode[data-ok='false'] {
+  background: #cf222e;
+}
+
+.timelineText {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.timelineStep {
+  font-weight: 600;
+}
+
+.timelineStatus[data-ok='true'] {
+  color: #1a7f37;
+}
+
+.timelineStatus[data-ok='false'] {
+  color: #cf222e;
+}
+
+.timelineReason {
+  color: var(--dsw-alias-label-error, #cf222e);
+  word-break: break-word;
+}
+
+.timelineHash {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   color: var(--dsw-alias-label-caption);
 }
 
-.detailError,
-.detailOutput {
-  margin: 0 0 6px;
-  padding: 6px 8px;
+.report {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.reportRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.reportLabel {
+  flex: none;
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.reportValue {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.outputToolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.search {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 11px;
+  color: inherit;
+  background: var(--dsw-alias-bg-base);
+}
+
+.toggle {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+  background: var(--dsw-alias-bg-base);
+  cursor: pointer;
+}
+
+.toggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.toggle[data-on='true'] {
+  color: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+/* Terminal-style process output (dark, monospace). */
+.terminal {
+  margin: 0;
+  padding: 8px;
   border-radius: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
@@ -242,10 +404,33 @@
   word-break: break-word;
   max-height: 220px;
   overflow: auto;
-  background: var(--dsw-alias-bg-subtle, rgba(128, 128, 128, 0.06));
+  background: #101418;
+  color: #d7e0e8;
+}
+
+.termLine {
+  min-height: 1.5em;
+}
+
+.hit {
+  background: #b08800;
+  color: #fff;
+  border-radius: 2px;
+  padding: 0 1px;
 }
 
 .detailError {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+  background: rgba(207, 34, 46, 0.08);
   color: var(--dsw-alias-label-error, #cf222e);
 }
 

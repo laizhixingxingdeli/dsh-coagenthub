@@ -7,6 +7,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { CoAgentHubClient } from './client.ts'
+import { getCoAgentHubSettingsStore } from './config.ts'
 import { registerCoAgentHubTools } from './tools.ts'
 
 /** Cordis function-plugin name. */
@@ -27,6 +28,8 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   const client = new CoAgentHubClient({
     baseURL: config.apiBase,
     participantId: config.participantId,
+    // Share the proxy's settings store so panel saves also steer the tools.
+    settingsStore: getCoAgentHubSettingsStore(),
   })
   ctx.effect(() => registerCoAgentHubTools(ctx, client), 'coagenthub.tools()')
 }

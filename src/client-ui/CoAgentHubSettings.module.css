@@ -1,0 +1,89 @@
+/* CoAgentHub settings form (browser half). Fills the 设置 tab of the CoAgentHub
+   panel: a small form for the CoAgentHub address + participantId with a 保存
+   button; the host half applies the change immediately. Uses the dsw theme
+   aliases so dark mode and future theme changes apply. */
+
+.content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.header {
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.label {
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.input {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  background: var(--dsw-alias-bg-base);
+}
+
+.input::placeholder {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.save {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 4px 14px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  cursor: pointer;
+}
+
+.save:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.saved {
+  margin: 0;
+  font-size: 12px;
+  color: #1a7f37;
+}
+
+.error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-error, #cf222e);
+}

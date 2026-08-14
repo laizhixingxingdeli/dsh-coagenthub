@@ -54,6 +54,13 @@ describe('createCoAgentHubTools', () => {
     expect(tools.map(tool => tool.name)).toEqual(EXPECTED_TOOL_NAMES)
   })
 
+  it('dispatch_task description guides clarifying ambiguous requirements', () => {
+    const client = clientWith(() => Promise.resolve([]))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    expect(tool.description).toContain('若任务需求存在歧义')
+    expect(tool.description).toContain('必须先向用户澄清要点,得到确认后再下发任务书')
+  })
+
   it('registers all six tools on a tools runtime', () => {
     const registered: string[] = []
     const fakeCtx = {

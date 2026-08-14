@@ -195,7 +195,7 @@ export function createCoAgentHubTools(client: CoAgentHubClient): ToolDefinition[
     defineTool({
       name: 'coagenthub_dispatch_task',
       description:
-        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id.',
+        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. 若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。',
       parameters: {
         groupId: { type: 'string', required: true, description: 'Target group id.' },
         body: { type: 'string', required: true, description: 'Task brief sent to the executor.' },
