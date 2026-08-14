@@ -94,7 +94,7 @@ describe('CoAgentHubPanel', () => {
     render(<CoAgentHubPanel />)
 
     expect(screen.getByLabelText('CoAgentHub 面板')).toBeTruthy()
-    expect(PANEL_TABS.map((t) => t.label)).toEqual(['群列表', '任务'])
+    expect(PANEL_TABS.map((t) => t.label)).toEqual(['群列表', '任务', '执行器'])
     expect(screen.getByRole('tab', { name: '群列表' }).getAttribute('aria-selected')).toBe('true')
     expect(screen.getByRole('heading', { name: 'CoAgentHub 群列表' })).toBeTruthy()
     await waitFor(() => {
@@ -119,5 +119,21 @@ describe('CoAgentHubPanel', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: '群列表' }))
     expect(screen.getByRole('heading', { name: 'CoAgentHub 群列表' })).toBeTruthy()
+  })
+
+  it('switches to the 执行器 tab', async () => {
+    vi.stubGlobal('fetch', groupFetchMock())
+
+    render(<CoAgentHubPanel />)
+    await waitFor(() => {
+      expect(screen.getByText('dsh-coagenthub 插件开发')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByRole('tab', { name: '执行器' }))
+    expect(screen.getByRole('tab', { name: '执行器' }).getAttribute('aria-selected')).toBe('true')
+    // 执行器面板:标题 + 新增表单开关
+    expect(screen.getByRole('heading', { name: 'CoAgentHub 执行器' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '新增执行器' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'CoAgentHub 群列表' })).toBeNull()
   })
 })

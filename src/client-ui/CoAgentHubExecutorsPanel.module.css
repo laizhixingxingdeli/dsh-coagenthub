@@ -1,0 +1,320 @@
+/* CoAgentHub executors panel (browser half). Fills the 执行器 tab of the
+   CoAgentHub panel: a header over the executor list, a collapsible create
+   form, and per-row actions (copy key / delete). Uses the dsw theme aliases
+   so dark mode and future theme changes apply. */
+
+.content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px 6px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.titleWrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.count {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-dimmed);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.refresh {
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+  background: transparent;
+  cursor: pointer;
+}
+
+.refresh:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.addToggle {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-caption);
+  background: var(--dsw-alias-bg-base);
+  cursor: pointer;
+}
+
+.addToggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.addToggle[data-open='true'] {
+  color: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-subtle, rgba(128, 128, 128, 0.06));
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fieldLabel {
+  flex: none;
+  width: 72px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  background: var(--dsw-alias-bg-base);
+}
+
+.input::placeholder {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.submit {
+  align-self: flex-end;
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 14px;
+  font: inherit;
+  font-size: 12px;
+  color: #fff;
+  background: var(--dsw-alias-brand-primary, #4c8bf5);
+  cursor: pointer;
+}
+
+.submit:hover {
+  filter: brightness(1.06);
+}
+
+.submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.body {
+  overflow-y: auto;
+  padding: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.row:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.row[data-builtin='true'] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowMain {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rowTop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.key {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.builtin {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: #1a7f37;
+  background: rgba(26, 127, 55, 0.12);
+}
+
+.model {
+  flex: none;
+  font-size: 11px;
+  color: var(--dsw-alias-label-dimmed);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agentName {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-caption);
+}
+
+.bin {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--dsw-alias-label-dimmed);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.args {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--dsw-alias-label-dimmed);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.copy,
+.delete {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+  background: var(--dsw-alias-bg-base);
+  cursor: pointer;
+}
+
+.copy:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.copy[data-copied='true'] {
+  color: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.delete {
+  color: var(--dsw-alias-label-error, #cf222e);
+  border-color: rgba(207, 34, 46, 0.35);
+}
+
+.delete:hover {
+  background: rgba(207, 34, 46, 0.1);
+}
+
+.empty,
+.error,
+.loading {
+  margin: 0;
+  padding: 14px 10px;
+  color: var(--dsw-alias-label-dimmed);
+  text-align: center;
+}
+
+.error {
+  color: var(--dsw-alias-label-error, #cf222e);
+  text-align: left;
+  font-size: 12px;
+}

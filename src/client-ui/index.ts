@@ -1,14 +1,17 @@
 /**
- * CoAgentHub plugin, browser half. Registers the panel (群列表 + 任务 tabs) into
- * the `shell.overlay` seat (ui-layout): the sidebar and details columns are both
- * single-kind slots with fixed occupants (SidebarRoot / DetailsPanel), so
- * registering there would replace shipped UI; shell.overlay is the list-kind
- * additive seat designed for a frame-wide surface of your own, and its root
- * scope renders without a current session.
+ * CoAgentHub plugin, browser half. Registers the panel (群列表 + 任务 + 执行器
+ * tabs) into the `shell.overlay` seat (ui-layout): the sidebar and details
+ * columns are both single-kind slots with fixed occupants (SidebarRoot /
+ * DetailsPanel), so registering there would replace shipped UI; shell.overlay
+ * is the list-kind additive seat designed for a frame-wide surface of your
+ * own, and its root scope renders without a current session.
  * @module @laizhixingxingdeli/dsh-coagenthub/client
  */
 
 import { CoAgentHubPanel } from './CoAgentHubPanel.tsx'
+import { CoAgentHubExecutorsPanel } from './CoAgentHubExecutorsPanel.tsx'
+
+export { CoAgentHubExecutorsPanel }
 
 /** Required services: the slot registry the panel registers into. */
 export const inject = ['slots']
