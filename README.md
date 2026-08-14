@@ -99,3 +99,5 @@ pnpm install
 pnpm test
 pnpm typecheck
 ```
+
+演示条目:本行由 DSh 执行器演练任务添加(2026-08-14)。
