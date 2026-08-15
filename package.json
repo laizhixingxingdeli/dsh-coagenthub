@@ -1,6 +1,6 @@
 {
   "name": "@laizhixingxingdeli/dsh-coagenthub",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": false,
   "type": "module",
   "license": "MIT",
@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit",
     "smoke": "cross-env COAGENTHUB_SMOKE=1 vitest run tests/smoke.spec.ts",
     "build": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build && node scripts/build-client.mjs"
   },
   "engines": {
     "node": ">=22.18"
