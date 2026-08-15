@@ -3,12 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   CoAgentHubTaskPanel,
+  REMINDER_DISMISS_MS,
   TASK_REFRESH_MS,
   attemptTimeline,
   capOutput,
+  diffTaskStatuses,
   fetchTasks,
   formatUpdatedAt,
   normalizeTaskView,
+  notifyDesktop,
   parseFinalReport,
   rawOutputUrl,
   statusLabel,
@@ -499,6 +502,169 @@ describe('CoAgentHubTaskPanel', () => {
     expect(within(detail).queryByText('执行历史')).toBeNull()
     expect(within(detail).queryByText('第 1 次')).toBeNull()
     expect(within(detail).queryByText('任务书')).toBeNull()
+  })
+})
+
+describe('CoAgentHubTaskPanel reminders', () => {
+  /** Fetch mock answering the group list first, then tasks whose status flips after the first call. */
+  function flipFetchMock(initialStatus: string, nextStatus: string) {
+    let tasksCall = 0
+    return vi.fn((url: string) => {
+      if (url.includes('/groups?')) {
+        return Promise.resolve(jsonResponse(groups([
+          { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+        ])))
+      }
+      tasksCall += 1
+      return Promise.resolve(jsonResponse([task({ id: 't1', status: tasksCall === 1 ? initialStatus : nextStatus })]))
+    })
+  }
+
+  it('does not show a reminder banner on initial load, even for terminal tasks', async () => {
+    vi.stubGlobal('fetch', groupFetchMock([task({ id: 't-done', status: 'done' })]))
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    await screen.findByText('实现登录页')
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('shows a reminder banner when a task transitions running → done on refresh', async () => {
+    vi.stubGlobal('fetch', flipFetchMock('running', 'done'))
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    await screen.findByText('执行中')
+    expect(screen.queryByRole('status')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+
+    const banner = await screen.findByRole('status')
+    expect(within(banner).getByText('已完成')).toBeTruthy()
+    expect(within(banner).getByText('atomcode')).toBeTruthy()
+    expect(within(banner).getByText('实现登录页')).toBeTruthy()
+  })
+
+  it('does not remind twice for the same task and status', async () => {
+    const fetchMock = flipFetchMock('running', 'done')
+    vi.stubGlobal('fetch', fetchMock)
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    await screen.findByText('执行中')
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await screen.findByRole('status')
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+
+    // 再次刷新,任务仍为 done:同一任务同一状态不重复提醒
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3))
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+  })
+
+  it('dismisses a reminder banner via its close button', async () => {
+    vi.stubGlobal('fetch', flipFetchMock('running', 'done'))
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    await screen.findByText('执行中')
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    const banner = await screen.findByRole('status')
+
+    fireEvent.click(within(banner).getByRole('button', { name: '关闭提醒' }))
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+  })
+
+  it('auto-dismisses a reminder banner after ~8 seconds', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', flipFetchMock('running', 'done'))
+    render(<CoAgentHubTaskPanel />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    fireEvent.change(screen.getByLabelText('选择群组'), { target: { value: 'g1' } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText('执行中')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(REMINDER_DISMISS_MS) })
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+})
+
+describe('CoAgentHubTaskPanel reminder helpers', () => {
+  it('diffs task statuses across refresh rounds: baseline, transitions, dedupe', () => {
+    const baseline = new Set<string>()
+    const prevStatus = new Map<string, string>()
+    const reminded = new Set<string>()
+
+    // 首次加载:只记录基线,不提醒
+    expect(diffTaskStatuses(baseline, prevStatus, reminded, 'g1', [
+      task({ id: 't1', status: 'running' }),
+      task({ id: 't2', status: 'done' }),
+    ])).toEqual([])
+
+    // running → done 提醒;done → done 不重复;首次出现的新任务(done)无上一轮状态不提醒
+    const round2 = diffTaskStatuses(baseline, prevStatus, reminded, 'g1', [
+      task({ id: 't1', status: 'done' }),
+      task({ id: 't2', status: 'done' }),
+      task({ id: 't3', status: 'done' }),
+    ])
+    expect(round2).toHaveLength(1)
+    expect(round2[0]!.taskId).toBe('t1')
+    expect(round2[0]!.status).toBe('done')
+    expect(round2[0]!.executor).toBe('atomcode')
+    expect(round2[0]!.summary).toBe('实现登录页')
+
+    // failed / cancelled 也会提醒
+    const round3 = diffTaskStatuses(baseline, prevStatus, reminded, 'g1', [
+      task({ id: 't1', status: 'failed' }),
+      task({ id: 't2', status: 'cancelled' }),
+    ])
+    expect(round3.map((r) => r.status).sort()).toEqual(['cancelled', 'failed'])
+
+    // 相同状态再次出现:不再提醒
+    expect(diffTaskStatuses(baseline, prevStatus, reminded, 'g1', [
+      task({ id: 't1', status: 'failed' }),
+      task({ id: 't2', status: 'cancelled' }),
+    ])).toEqual([])
+  })
+
+  it('treats each group as its own baseline, so switching groups does not spam reminders', () => {
+    const baseline = new Set<string>()
+    const prevStatus = new Map<string, string>()
+    const reminded = new Set<string>()
+    const doneTask = task({ id: 't1', status: 'done' })
+
+    expect(diffTaskStatuses(baseline, prevStatus, reminded, 'g1', [doneTask])).toEqual([])
+    // 另一个群首次加载也是基线;切回 g1 时任务早已 done,不重复提醒
+    expect(diffTaskStatuses(baseline, prevStatus, reminded, 'g2', [doneTask])).toEqual([])
+    expect(diffTaskStatuses(baseline, prevStatus, reminded, 'g1', [doneTask])).toEqual([])
+  })
+
+  it('notifyDesktop sends a system notification only when hidden and permission is granted', () => {
+    const NotificationCtor = vi.fn()
+    const reminder = { key: 'g1:t1:done', taskId: 't1', status: 'done', executor: 'atomcode', summary: '实现登录页' }
+
+    // 无权限:不发
+    vi.stubGlobal('Notification', Object.assign(vi.fn(), { permission: 'denied' }))
+    notifyDesktop([reminder])
+    expect(NotificationCtor).not.toHaveBeenCalled()
+
+    // 有权限但页面可见(jsdom document.hidden === false):不发
+    vi.stubGlobal('Notification', Object.assign(NotificationCtor, { permission: 'granted' }))
+    notifyDesktop([reminder])
+    expect(NotificationCtor).not.toHaveBeenCalled()
+
+    // 有权限且页面隐藏:发一条系统桌面通知
+    const own = Object.getOwnPropertyDescriptor(document, 'hidden')
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+    try {
+      notifyDesktop([reminder])
+      expect(NotificationCtor).toHaveBeenCalledWith('CoAgentHub 任务已完成', { body: 'atomcode 实现登录页' })
+    } finally {
+      if (own !== undefined) Object.defineProperty(document, 'hidden', own)
+      else delete (document as unknown as Record<string, unknown>).hidden
+    }
   })
 })
 
