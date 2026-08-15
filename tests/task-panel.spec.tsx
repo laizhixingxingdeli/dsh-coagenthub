@@ -15,6 +15,7 @@ import {
   parseFinalReport,
   rawOutputUrl,
   statusLabel,
+  type CoAgentHubTaskAttempt,
   type CoAgentHubTaskView,
 } from '../src/client-ui/CoAgentHubTaskPanel.tsx'
 import { DEFAULT_API_BASE, GROUP_LIST_LIMIT } from '../src/client-ui/CoAgentHubGroupList.tsx'
@@ -800,5 +801,69 @@ describe('fetchTasks normalization', () => {
       updatedAt: '',
       retryCount: 0,
     })
+  })
+
+  it('normalizeTaskView fills safe defaults for attempts with missing fields', () => {
+    const view = normalizeTaskView({
+      id: 't1',
+      status: 'failed',
+      attempts: [
+        { n: 1, status: 'failed', error: 'exit 1' } as unknown as CoAgentHubTaskAttempt,
+      ],
+    })
+
+    expect(view.attempts).toEqual([
+      {
+        n: 1,
+        startedAt: '',
+        endedAt: null,
+        status: 'failed',
+        error: 'exit 1',
+        summary: null,
+        hash: null,
+      },
+    ])
+  })
+
+  it('renders the attempt timeline without crashing when error/hash are undefined', () => {
+    const timeline = attemptTimeline([
+      {
+        n: 1,
+        startedAt: '2026-08-14T09:00:00Z',
+        endedAt: null,
+        status: 'failed',
+        error: undefined,
+        summary: undefined,
+        hash: undefined,
+      } as unknown as CoAgentHubTaskAttempt,
+    ])
+    expect(timeline).toBe('第 1 次 失败')
+  })
+
+  it('expands a task whose raw attempts omit hash/error without crashing', async () => {
+    // 服务端原始 attempt 缺 hash/error 等字段(相当于 undefined),点击详情不应崩溃
+    vi.stubGlobal(
+      'fetch',
+      groupFetchMock([
+        {
+          id: 't1',
+          status: 'failed',
+          createdAt: '2026-08-14T10:00:00Z',
+          retryCount: 0,
+          attempts: [{ n: 1, status: 'failed', error: 'exit 1' }],
+        },
+      ]),
+    )
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+
+    const row = await screen.findByRole('button', { name: /失败/ })
+    fireEvent.click(row)
+
+    const detail = screen.getByTestId('task-detail')
+    expect(within(detail).getByText('执行历史')).toBeTruthy()
+    expect(within(detail).getByText('第 1 次')).toBeTruthy()
+    expect(within(detail).getByText('exit 1')).toBeTruthy()
   })
 })

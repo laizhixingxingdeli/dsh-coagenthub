@@ -86,7 +86,15 @@ export function normalizeTaskView(raw: CoAgentHubTaskInput): CoAgentHubTaskView 
     executorLabel: raw.executorLabel ?? '',
     brief: raw.brief ?? '',
     diffSummary: raw.diffSummary ?? null,
-    attempts: raw.attempts ?? [],
+    attempts: (raw.attempts ?? []).map((attempt) => ({
+      n: attempt.n ?? 0,
+      startedAt: attempt.startedAt ?? '',
+      endedAt: attempt.endedAt ?? null,
+      status: attempt.status ?? '',
+      error: attempt.error ?? null,
+      summary: attempt.summary ?? null,
+      hash: attempt.hash ?? null,
+    })),
     createdAt: raw.createdAt ?? '',
     updatedAt: raw.updatedAt ?? raw.createdAt ?? '',
     retryCount: raw.retryCount ?? 0,
@@ -218,8 +226,8 @@ export function isBriefTruncated(task: CoAgentHubTaskView): boolean {
 /** One attempt as `第 N 次 <status> <error> <hash>`, the timeline step text. */
 export function attemptStep(attempt: CoAgentHubTaskAttempt): string {
   const parts = [`第 ${attempt.n} 次`, statusLabel(attempt.status)]
-  if (attempt.error !== null && attempt.error !== '') parts.push(attempt.error)
-  if (attempt.hash !== null && attempt.hash !== '') parts.push(attempt.hash.slice(0, 7))
+  if (attempt.error != null && attempt.error !== '') parts.push(attempt.error)
+  if (attempt.hash != null && attempt.hash !== '') parts.push(attempt.hash.slice(0, 7))
   return parts.join(' ')
 }
 
@@ -623,10 +631,10 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
                                     <span className={css.timelineStatus} data-ok={ok || undefined}>
                                       {statusLabel(attempt.status)}
                                     </span>
-                                    {attempt.error !== null && attempt.error !== '' && (
+                                    {attempt.error != null && attempt.error !== '' && (
                                       <span className={css.timelineReason}>{attempt.error}</span>
                                     )}
-                                    {attempt.hash !== null && attempt.hash !== '' && (
+                                    {attempt.hash != null && attempt.hash !== '' && (
                                       <span className={css.timelineHash}>{attempt.hash.slice(0, 7)}</span>
                                     )}
                                   </span>
