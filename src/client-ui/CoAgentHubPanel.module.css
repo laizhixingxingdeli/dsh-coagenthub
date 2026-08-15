@@ -45,6 +45,14 @@
   font-weight: 600;
   letter-spacing: 0.2px;
   white-space: nowrap;
+  /* 标题栏即拖动区:grab 光标 + 禁选文本 + 触摸端禁用默认滚动。 */
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.title:active {
+  cursor: grabbing;
 }
 
 .tabs {

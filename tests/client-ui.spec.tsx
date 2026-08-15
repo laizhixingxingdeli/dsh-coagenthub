@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { CoAgentHubGroupList, DEFAULT_API_BASE, GROUP_LIST_LIMIT } from '../src/client-ui/CoAgentHubGroupList.tsx'
-import { CoAgentHubPanel, PANEL_TABS } from '../src/client-ui/CoAgentHubPanel.tsx'
+import { CoAgentHubPanel, PANEL_POSITION_KEY, PANEL_TABS } from '../src/client-ui/CoAgentHubPanel.tsx'
 import { ACTIVE_GROUP_STORAGE_KEY, saveActiveGroupId } from '../src/client-ui/workspace-status.ts'
 import { groupFetchMock, jsonResponse, groups } from './helpers.ts'
 
@@ -153,6 +153,57 @@ describe('CoAgentHubPanel', () => {
     expect(screen.getByLabelText('CoAgentHub 地址')).toBeTruthy()
     expect(screen.getByLabelText('participantId')).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'CoAgentHub 群列表' })).toBeNull()
+  })
+})
+
+describe('CoAgentHubPanel 拖动移动', () => {
+  /**
+   * 模拟从 (from) 拖到 (to)。jsdom 无 PointerEvent,fireEvent.pointerMove 会退回
+   * 裸 Event、丢掉 clientX/Y;这里直接派发带坐标的 MouseEvent(type 仍用
+   * pointerdown/move/up),组件监听的是事件名,坐标即可正常传递。
+   */
+  function dragTitle(from: { x: number; y: number }, to: { x: number; y: number }) {
+    const title = screen.getByRole('heading', { name: 'CoAgentHub' })
+    title.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: from.x, clientY: from.y }))
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: to.x, clientY: to.y }))
+    window.dispatchEvent(new MouseEvent('pointerup', { clientX: to.x, clientY: to.y }))
+  }
+
+  it('dragging the title bar saves the position to localStorage', async () => {
+    vi.stubGlobal('fetch', groupFetchMock())
+    render(<CoAgentHubPanel />)
+    await waitFor(() => {
+      expect(screen.getByText('dsh-coagenthub 插件开发')).toBeTruthy()
+    })
+
+    dragTitle({ x: 0, y: 0 }, { x: 100, y: 50 })
+
+    expect(localStorage.getItem(PANEL_POSITION_KEY)).toBe(JSON.stringify({ left: 100, top: 50 }))
+  })
+
+  it('restores the saved position on refresh', async () => {
+    localStorage.setItem(PANEL_POSITION_KEY, JSON.stringify({ left: 100, top: 50 }))
+    vi.stubGlobal('fetch', groupFetchMock())
+
+    render(<CoAgentHubPanel />)
+
+    const panel = screen.getByLabelText('CoAgentHub 面板') as HTMLElement
+    expect(panel.style.left).toBe('100px')
+    expect(panel.style.top).toBe('50px')
+  })
+
+  it('clamps the position so at least 48px stays inside the viewport', async () => {
+    vi.stubGlobal('fetch', groupFetchMock())
+    render(<CoAgentHubPanel />)
+    await waitFor(() => {
+      expect(screen.getByText('dsh-coagenthub 插件开发')).toBeTruthy()
+    })
+
+    dragTitle({ x: 0, y: 0 }, { x: 9999, y: 9999 })
+
+    const saved = JSON.parse(localStorage.getItem(PANEL_POSITION_KEY)!) as { left: number; top: number }
+    expect(saved.left).toBe(window.innerWidth - 48)
+    expect(saved.top).toBe(window.innerHeight - 48)
   })
 })
 

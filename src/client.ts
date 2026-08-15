@@ -41,6 +41,14 @@ export interface Group {
   memberCount: number
   /** Mac-side project path when the group is bound to a repo; absent otherwise. */
   projectPath?: string | null
+  /** Group members when the endpoint returns them (GET /groups/:id). */
+  members?: GroupMember[]
+}
+
+export interface GroupMember {
+  id: string
+  name: string
+  device?: string | null
 }
 
 export interface GroupList {
@@ -77,6 +85,17 @@ export interface TaskDiffSummary {
   outputTail?: string | null
 }
 
+/** One attempt in a task's retry timeline (from `attempts` in the task payload). */
+export interface TaskAttempt {
+  n: number
+  startedAt: string
+  endedAt: string | null
+  status: string
+  error: string | null
+  summary: string | null
+  hash: string | null
+}
+
 export interface Task {
   id: string
   groupId: string
@@ -88,8 +107,21 @@ export interface Task {
   checkpointRef: string | null
   retryCount: number
   diffSummary: TaskDiffSummary | null
+  attempts?: TaskAttempt[]
   createdAt: string
   updatedAt: string
+}
+
+/** An executor registered on the CoAgentHub server (GET /executors). */
+export interface Executor {
+  key: string
+  agentName: string
+  kind?: string | null
+  bin?: string | null
+  url?: string | null
+  model?: string | null
+  device?: string | null
+  online?: boolean | null
 }
 
 /** HTTP-level failure carrying the status code and a response body summary. */
@@ -206,6 +238,37 @@ export class CoAgentHubClient {
   listTasks(groupId: string, includeOutput = false): Promise<Task[]> {
     const query = includeOutput ? '?includeOutput=1' : ''
     return this.request<Task[]>(`/groups/${encodeURIComponent(groupId)}/tasks${query}`)
+  }
+
+  /** Fetch one group by id (GET /groups/:id); may include `members`. */
+  getGroup(groupId: string): Promise<Group> {
+    return this.request<Group>(`/groups/${encodeURIComponent(groupId)}`)
+  }
+
+  /** List registered executors (GET /executors). */
+  listExecutors(): Promise<Executor[]> {
+    return this.request<Executor[]>('/executors')
+  }
+
+  /**
+   * Fetch one task by id. Prefers the single-task endpoint
+   * (`GET /groups/:id/tasks/:taskId`); when the server has no such endpoint
+   * (404/405) it falls back to `listTasks(groupId, true)` and filters.
+   */
+  async getTask(groupId: string, taskId: string): Promise<Task> {
+    try {
+      return await this.request<Task>(`/groups/${encodeURIComponent(groupId)}/tasks/${encodeURIComponent(taskId)}`)
+    } catch (error) {
+      if (error instanceof CoAgentHubError && (error.status === 404 || error.status === 405)) {
+        const tasks = await this.listTasks(groupId, true)
+        const task = tasks.find(candidate => candidate.id === taskId)
+        if (task === undefined) {
+          throw new CoAgentHubError(404, `task ${taskId} not found in group ${groupId}`)
+        }
+        return task
+      }
+      throw error
+    }
   }
 
   async getParticipantByName(name: string): Promise<Participant | undefined> {

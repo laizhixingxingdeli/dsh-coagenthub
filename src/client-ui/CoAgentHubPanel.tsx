@@ -67,6 +67,48 @@ function readSavedSize(): { width: number; height: number } {
   return DEFAULT_SIZE
 }
 
+/** localStorage key remembering the panel's dragged position. */
+export const PANEL_POSITION_KEY = 'coagenthub.panelPosition'
+
+/** 拖动时面板至少保留在视口内的像素数。 */
+const MIN_VISIBLE_PX = 48
+
+/** Clamp so at least {@link MIN_VISIBLE_PX}px of the panel stays inside the viewport. */
+export function clampPanelPosition(
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): { left: number; top: number } {
+  const minLeft = -width + MIN_VISIBLE_PX
+  const maxLeft = window.innerWidth - MIN_VISIBLE_PX
+  const minTop = -height + MIN_VISIBLE_PX
+  const maxTop = window.innerHeight - MIN_VISIBLE_PX
+  return {
+    left: Math.min(maxLeft, Math.max(minLeft, left)),
+    top: Math.min(maxTop, Math.max(minTop, top)),
+  }
+}
+
+/** Restore the saved position; null means the default top-right corner. */
+function readSavedPosition(): { left: number; top: number } | null {
+  try {
+    const raw = localStorage.getItem(PANEL_POSITION_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as { left?: unknown; top?: unknown }
+      if (
+        typeof parsed.left === 'number' && Number.isFinite(parsed.left)
+        && typeof parsed.top === 'number' && Number.isFinite(parsed.top)
+      ) {
+        return { left: parsed.left, top: parsed.top }
+      }
+    }
+  } catch {
+    // localStorage 不可用或数据损坏:回落默认位置(右上角)。
+  }
+  return null
+}
+
 export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelProps) {
   const [tab, setTab] = useState<CoAgentHubTab>('groups')
   const [taskDetailOpen, setTaskDetailOpen] = useState(false)
@@ -75,6 +117,18 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
   const sizeRef = useRef(size)
   sizeRef.current = size
   const resizeStart = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+  const panelRef = useRef<HTMLElement | null>(null)
+  // 面板位置:null = 默认右上角;拖动后写入 localStorage(coagenthub.panelPosition)。
+  // 恢复时按当前视口与面板尺寸重新夹紧,避免换小窗口后面板整体出屏无法拖回。
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(() => {
+    const saved = readSavedPosition()
+    if (saved === null) return null
+    const restoredSize = readSavedSize()
+    return clampPanelPosition(saved.left, saved.top, restoredSize.width, restoredSize.height)
+  })
+  const positionRef = useRef(position)
+  positionRef.current = position
+  const dragStart = useRef<{ x: number; y: number; left: number; top: number } | null>(null)
 
   // 当前虚拟工作区:localStorage 记住;host 设置镜像让 agent 侧工具可读。
   const [activeGroupId, setActiveGroupId] = useState<string | null>(() => readActiveGroupId())
@@ -138,6 +192,43 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
     window.addEventListener('pointerup', onUp)
   }, [size])
 
+  // 拖动标题栏移动面板:pointerdown 记录起点(优先用已保存位置,否则读当前布局),
+  // pointermove 按位移更新并夹紧到视口内,pointerup 持久化到 localStorage。
+  const onDragPointerDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    const rect = panelRef.current?.getBoundingClientRect()
+    const current = positionRef.current
+    dragStart.current = {
+      x: e.clientX,
+      y: e.clientY,
+      left: current?.left ?? rect?.left ?? 0,
+      top: current?.top ?? rect?.top ?? 0,
+    }
+    const onMove = (ev: PointerEvent) => {
+      if (!dragStart.current) return
+      const { x, y, left, top } = dragStart.current
+      const next = clampPanelPosition(left + (ev.clientX - x), top + (ev.clientY - y), sizeRef.current.width, sizeRef.current.height)
+      setPosition(next)
+      positionRef.current = next
+    }
+    const onUp = () => {
+      dragStart.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+      try {
+        // 用 ref 里的最新位置保存(state 更新是异步的,闭包里的 position 已过期)。
+        localStorage.setItem(PANEL_POSITION_KEY, JSON.stringify(positionRef.current))
+      } catch {
+        // 持久化失败不影响本次拖动。
+      }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    // 触摸/系统手势取消指针时也要清理,避免监听器泄漏、面板被残留拖动状态带跑。
+    window.addEventListener('pointercancel', onUp)
+  }, [])
+
   // The task panel unmounts on tab switch; reset the widened-panel flag.
   useEffect(() => {
     if (tab !== 'tasks') setTaskDetailOpen(false)
@@ -145,13 +236,19 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
 
   return (
     <section
+      ref={panelRef}
       className={css.panel}
       data-detail-open={taskDetailOpen || undefined}
       aria-label="CoAgentHub 面板"
-      style={{ width: size.width, height: size.height }}
+      style={{
+        width: size.width,
+        height: size.height,
+        // 有保存位置时用 left/top 定位(并清掉 CSS 的 right),否则默认右上角。
+        ...(position !== null ? { left: position.left, top: position.top, right: 'auto' as const } : {}),
+      }}
     >
       <header className={css.header}>
-        <h2 className={css.title}>CoAgentHub</h2>
+        <h2 className={css.title} onPointerDown={onDragPointerDown}>CoAgentHub</h2>
         <div className={css.tabs} role="tablist" aria-label="面板切换">
           {PANEL_TABS.map(({ id, label }) => (
             <button

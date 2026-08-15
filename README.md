@@ -8,6 +8,7 @@ DeepSeek Harness(`dsh`)插件:把 CoAgentHub(局域网多参与者协作中枢)�
 - **二期:浏览器半**——群列表面板挂到 dsh 三栏 slot(未实现)
 - **三期:任务面板**——面板升级为「群列表 | 任务」双 Tab:群列表沿用二期;任务 Tab 选群后展示该群任务全貌(状态徽章/执行器/摘要/attempt 时间线/输出 tail,支持复制任务 id、15s 自动刷新 running 任务)
 - **四期:执行器 Tab**——面板升级为「群列表 | 任务 | 执行器」三 Tab:执行器 Tab 列出全部执行器(key/agentName/bin/args/内置徽章/model),非内置可删除(confirm 后 DELETE)、复制 key;折叠式新增表单(POST key/kind/agentName/bin/args/model,kind 默认 cli),内置行不提供删除
+- **五期:指挥官指挥台**——Windows 侧 agent 成为「分析/拆任务/验收」指挥官:新增 5 个工具(`coagenthub_list_groups` / `coagenthub_get_group` / `coagenthub_list_executors` / `coagenthub_get_task` / `coagenthub_get_notifications`)、`coagenthub_dispatch_task` 支持结构化任务书字段、工作区级指令 `COAGENTHUB.md`、后台 WS 订阅 + 任务状态通知;面板标题栏可拖动并记忆位置
 
 ## 安装
 
@@ -52,11 +53,18 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
 | 工具 | 参数 | 说明 |
 | --- | --- | --- |
 | `coagenthub_list_participants` | — | 列出参与者(id/name/type/device/在线状态) |
+| `coagenthub_list_executors` | — | 列出注册执行器(key/agentName/kind/bin/url/model/device/online) |
 | `coagenthub_create_group` | `title` | 建群,返回 id/title/status |
+| `coagenthub_list_groups` | `limit?`(默认 100)、`status?`(`active`/`archived`) | 群列表(id/title/status/projectPath) |
+| `coagenthub_get_group` | `groupId` | 单个群(id/title/status/projectPath/members) |
 | `coagenthub_post_message` | `groupId`、`body`、`audience?`(默认 broadcast)、`audienceRef?` | 群消息 |
-| `coagenthub_dispatch_task` | `groupId`、`body`、`executorName?`(默认 AtomCode) | 找名字含 executorName 的参与者,发定向消息触发任务;返回消息 id |
+| `coagenthub_dispatch_task` | `groupId`、`body`、`executorName?`(默认 AtomCode)、`goal?/scope?/acceptance?/tests?/report?/priority?/dependencies?` | 找名字含 executorName 的参与者,发定向消息触发任务;结构化字段渲染成 Markdown 任务书(只传 body 时原样发送);返回消息 id |
 | `coagenthub_list_tasks` | `groupId` | 任务列表(id/status/executor/summary/时间) |
+| `coagenthub_get_task` | `groupId`、`taskId` | 单个任务(id/status/executorName/brief/retryCount/attempts/diffSummary/outputTail) |
 | `coagenthub_get_messages` | `groupId`、`after?` | 消息列表(增量,按创建时间倒序) |
+| `coagenthub_get_active_group` | — | 当前虚拟工作区 `{ groupId, groupTitle, projectPath?, winPath?, instructions? }`;未选择返回 null |
+| `coagenthub_get_workspace_instructions` | — | 读取当前工作区根目录 `COAGENTHUB.md` 指令 `{ groupId, groupTitle, instructions }`;非插件工作区返回 `instructions: null` |
+| `coagenthub_get_notifications` | — | 返回并清空后台事件通知(task.completed/failed/stalled/status_changed、message.received),供补读 |
 
 典型闭环:建群 → 发任务 → 查状态:
 
@@ -70,6 +78,7 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
 
 dsh web 页面右上角悬浮一个 **CoAgentHub 面板**(`shell.overlay` seat,320px):
 
+- **面板外壳**:拖动标题栏可移动面板,位置存 `localStorage`(`coagenthub.panelPosition`,默认右上角,刷新后恢复,移动时至少保留 48px 在视口内);右下角拖拽手柄可调大小(`coagenthub.panelSize`)。
 - **群列表 Tab**:群列表 + 状态,点击行复制群 id。
 - **任务 Tab**:顶部下拉选群(复用群列表数据),下方展示该群任务:状态徽章(排队中=黄、执行中=绿点脉冲、已完成=绿、失败=红、已取消=灰)、执行器、摘要(前 60 字)、相对时间;点击行展开详情(brief 前 300 字、attempt 时间线「第 N 次 失败 exit 1 → 第 2 次 成功 abc1234」、diffSummary error / 输出 tail,均最多 2000 字)。每行可复制任务 id,顶部按钮手动刷新;选中群后每 15s 自动刷新(running 任务实时跟进)。
 - **执行器 Tab**:列出全部执行器(key/agentName/bin/args 截断/内置徽章「内置」/model 有则显示),非内置行可删除(confirm 后 DELETE,失败显示错误)、每行复制 key;「新增执行器」展开折叠表单(key、kind 必填,kind 默认 cli,agentName/bin/args/model 可空),提交 POST 成功即刷新并清空表单。
@@ -82,6 +91,25 @@ node scripts/build-client.mjs   # 产出 lib/client.js(dsh web 启动时加载)
 ```
 
 验证(需本机 dsh web + CoAgentHub 运行中):打开 `http://localhost:3080`,面板应显示「群列表 | 任务 | 执行器」三 Tab,选群后出现真实任务行,执行器 Tab 出现真实执行器列表。
+
+## 架构分层
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/client.ts` | 纯 HTTP 客户端(不读本地文件、不做业务判断);`getGroup` / `listExecutors` / `getTask`(优先单查端点,404/405 回落 `listTasks` 过滤) |
+| `src/tools.ts` | 薄工具层:参数校验 + 调 client + 格式化输出;全部 13 个工具 |
+| `src/task-book.ts` | 纯函数 `buildTaskBook`:把 `dispatch_task` 的结构化字段(goal/scope/acceptance/tests/report/priority/dependencies)渲染成 Markdown 任务书;无结构化字段时原样透传 body |
+| `src/workspace-instructions.ts` | 读取当前工作区根目录 `COAGENTHUB.md`(agent session cwd,headless 回落 `process.cwd()`);不放在 client.ts |
+| `src/config.ts` | 运行时设置(apiBase / participantId / 映射规则 / activeGroupId),host 半持久化 |
+| `src/ws-client.ts` | Node 侧 WebSocket 客户端:`<apiBase>/ws?participantId=<id>`,指数退避重连 1s→30s,身份变化自动重连 |
+| `src/task-watcher.ts` | 后台任务状态监测:订阅 `group_message` / `task_output` / `task_stall_alert` / `task_status_changed` 帧 + 对 active group 低频轮询(4s)兜底,检测 queued→running→done/failed 变化 |
+| `src/notification-queue.ts` | 内存通知队列(容量 200):task.completed / task.failed / task.stalled / task.status_changed / message.received |
+| `src/notify.ts` | 通知投递:默认入队供 `coagenthub_get_notifications` 拉取;预留主动推送接口(push) |
+| `src/proxy.ts` | host 半 HTTP 代理(同源路由 `/coagenthub-api` 转发到 CoAgentHub) |
+| `src/client-ui/*` | 浏览器半面板(群列表/任务/执行器/设置 + 可拖动外壳),不实现 agent 工具 |
+| `COAGENTHUB.md` | 插件工作区常驻指令,`coagenthub_get_workspace_instructions` / `coagenthub_get_active_group` 读取 |
+
+后台事件链路:B 方案 —— `TaskWatcher` 接 WS 帧并做低频轮询兜底 → `notificationDeliverer` 入队(可扩展主动推送)→ agent 用 `coagenthub_get_notifications` 补读,替代轮询查任务状态。
 
 ## 测试
 

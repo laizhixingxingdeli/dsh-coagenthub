@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { CoAgentHubClient } from '../src/client.ts'
 import { CoAgentHubSettingsStore } from '../src/config.ts'
+import { notificationQueue } from '../src/notification-queue.ts'
 import { createCoAgentHubTools, registerCoAgentHubTools } from '../src/tools.ts'
 
 const EXPECTED_TOOL_NAMES = [
@@ -13,6 +17,12 @@ const EXPECTED_TOOL_NAMES = [
   'coagenthub_list_tasks',
   'coagenthub_get_messages',
   'coagenthub_get_active_group',
+  'coagenthub_get_workspace_instructions',
+  'coagenthub_list_groups',
+  'coagenthub_get_group',
+  'coagenthub_list_executors',
+  'coagenthub_get_task',
+  'coagenthub_get_notifications',
 ] as const
 
 function participant(overrides: Partial<{ id: string; name: string; device: string | null; lastSeen: string | null }>) {
@@ -50,7 +60,7 @@ afterEach(() => {
 })
 
 describe('createCoAgentHubTools', () => {
-  it('defines exactly the seven expected tools', () => {
+  it('defines exactly the expected tools', () => {
     const client = clientWith(() => Promise.resolve([]))
     const tools = createCoAgentHubTools(client)
     expect(tools.map(tool => tool.name)).toEqual(EXPECTED_TOOL_NAMES)
@@ -196,7 +206,9 @@ describe('createCoAgentHubTools', () => {
       Promise.resolve({ items: [{ id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' }], total: 1 }),
     )
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
-    expect(await execute(tool, {})).toEqual({ groupId: 'g1', groupTitle: 'dsh-coagenthub 插件开发' })
+    const result = (await execute(tool, {})) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({ groupId: 'g1', groupTitle: 'dsh-coagenthub 插件开发' }))
+    expect(result.projectPath).toBeNull()
   })
 
   it('get_active_group returns null when the stored group no longer exists', async () => {
@@ -205,5 +217,225 @@ describe('createCoAgentHubTools', () => {
     const client = clientWith(() => Promise.resolve({ items: [], total: 0 }))
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
     expect(await execute(tool, {})).toBeNull()
+  })
+})
+
+describe('commander tools (list_groups / get_group / list_executors / get_task / notifications / workspace instructions)', () => {
+  function group(id: string, title: string, status = 'active', projectPath: string | null = null) {
+    return { id, title, status, projectPath, createdBy: 'u1', createdAt: '', updatedAt: '', memberCount: 0 }
+  }
+
+  it('list_groups maps groups and filters by status', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', 'A', 'active', '/mac/a'), group('g2', 'B', 'archived')],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_list_groups')!
+    const all = (await execute(tool, {})) as Array<{ id: string; projectPath?: string }>
+    expect(all).toEqual([
+      { id: 'g1', title: 'A', status: 'active', projectPath: '/mac/a' },
+      { id: 'g2', title: 'B', status: 'archived', projectPath: undefined },
+    ])
+    const active = (await execute(tool, { status: 'active' })) as Array<{ id: string }>
+    expect(active.map(item => item.id)).toEqual(['g1'])
+    const archived = (await execute(tool, { status: 'archived' })) as Array<{ id: string }>
+    expect(archived.map(item => item.id)).toEqual(['g2'])
+  })
+
+  it('list_groups passes the limit to listGroups', async () => {
+    const client = clientWith(() => Promise.resolve({ items: [], total: 0 }))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_list_groups')!
+    await execute(tool, { limit: 50 })
+    const url = String((fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0])
+    expect(url).toContain('limit=50')
+  })
+
+  it('get_group returns projectPath and members', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        ...group('g1', 'A', 'active', '/mac/a'),
+        members: [{ id: 'm1', name: 'AtomCode 执行器' }],
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group')!
+    const result = (await execute(tool, { groupId: 'g1' })) as Record<string, unknown>
+    expect(result).toEqual({
+      id: 'g1',
+      title: 'A',
+      status: 'active',
+      projectPath: '/mac/a',
+      members: [{ id: 'm1', name: 'AtomCode 执行器' }],
+    })
+  })
+
+  it('list_executors maps executors to the view shape', async () => {
+    const client = clientWith(() =>
+      Promise.resolve([
+        { key: 'k1', agentName: 'AtomCode 执行器', kind: 'cli', bin: '/usr/bin/node', model: 'deepseek' },
+        { key: 'k2', agentName: 'Win dsh', kind: null, bin: null, url: null, model: null, device: 'windows', online: true },
+      ]),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_list_executors')!
+    const result = (await execute(tool, {})) as Array<Record<string, unknown>>
+    expect(result[0]).toEqual({
+      key: 'k1',
+      agentName: 'AtomCode 执行器',
+      kind: 'cli',
+      bin: '/usr/bin/node',
+      url: undefined,
+      model: 'deepseek',
+      device: undefined,
+      online: undefined,
+    })
+    expect(result[1]).toMatchObject({ device: 'windows', online: true })
+  })
+
+  it('get_task resolves executorName and carries attempts / diffSummary / outputTail', async () => {
+    const task = {
+      id: 't1',
+      groupId: 'g1',
+      status: 'done',
+      executorParticipantId: 'e-atom',
+      brief: '实现登录页',
+      retryCount: 1,
+      attempts: [{ n: 1, startedAt: 'a', endedAt: 'b', status: 'done', error: null, summary: 's', hash: 'h' }],
+      diffSummary: { summary: '完成', hash: 'abc1234', error: null, outputTail: 'tail' },
+      createdAt: 'c',
+      updatedAt: 'u',
+    }
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).includes('/tasks/t1')) return Promise.resolve(task)
+      return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_task')!
+    const result = (await execute(tool, { groupId: 'g1', taskId: 't1' })) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({
+      id: 't1',
+      status: 'done',
+      executorParticipantId: 'e-atom',
+      executorName: 'AtomCode 执行器',
+      brief: '实现登录页',
+      retryCount: 1,
+      attempts: task.attempts,
+      outputTail: 'tail',
+    }))
+  })
+
+  it('get_notifications returns and clears the pending queue', async () => {
+    notificationQueue.drain() // 清空共享队列,避免用例间串扰
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
+    const client = clientWith(() => Promise.resolve([]))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    const first = (await execute(tool, {})) as Array<{ type: string; groupId: string }>
+    expect(first).toEqual([expect.objectContaining({ type: 'task.completed', groupId: 'g1' })])
+    const second = (await execute(tool, {})) as unknown[]
+    expect(second).toEqual([])
+  })
+
+  it('dispatch_task renders structured fields into the task book body', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = await execute(tool, {
+      groupId: 'g1',
+      body: '实现登录页',
+      goal: '完成登录功能',
+      scope: '不含支付',
+      acceptance: '能登录、能登出',
+      tests: 'pnpm test 通过',
+      report: '提交 + 测试摘要',
+    })
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+    const [, init] = postMessage.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(String(init.body)).body as string
+    expect(body).toContain('实现登录页')
+    expect(body).toContain('## 目标')
+    expect(body).toContain('完成登录功能')
+    expect(body).toContain('## 范围')
+    expect(body).toContain('不含支付')
+    expect(body).toContain('## 验收标准')
+    expect(body).toContain('能登录、能登出')
+    expect(body).toContain('## 测试要求')
+    expect(body).toContain('## 汇报格式')
+  })
+
+  it('dispatch_task keeps the body verbatim when no structured fields are passed', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    await execute(tool, { groupId: 'g1', body: '原样任务书' })
+    const [, init] = postMessage.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body)).body).toBe('原样任务书')
+  })
+
+  it('get_workspace_instructions reads COAGENTHUB.md from the workspace root', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagenthub-ws-'))
+    try {
+      writeFileSync(join(dir, 'COAGENTHUB.md'), '# 指令\n\n指挥官职责\n')
+      const store = new CoAgentHubSettingsStore(null)
+      store.set({ activeGroupId: 'g1' })
+      const client = clientWith(() => Promise.resolve({ items: [group('g1', '群A')], total: 1 }))
+      const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_workspace_instructions')!
+      const result = (await tool.execute({}, {
+        agent: { session: { meta: { cwd: dir } } },
+      } as never)) as Record<string, unknown>
+      expect(result).toEqual({ groupId: 'g1', groupTitle: '群A', instructions: '# 指令\n\n指挥官职责\n' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('get_workspace_instructions returns instructions null in a non-plugin workspace', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagenthub-empty-'))
+    try {
+      const client = clientWith(() => Promise.resolve({ items: [], total: 0 }))
+      const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_workspace_instructions')!
+      const result = (await tool.execute({}, {
+        agent: { session: { meta: { cwd: dir } } },
+      } as never)) as Record<string, unknown>
+      expect(result).toEqual({ groupId: null, groupTitle: null, instructions: null })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('get_active_group projects winPath and reads instructions', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagenthub-active-'))
+    try {
+      writeFileSync(join(dir, 'COAGENTHUB.md'), '工作区指令')
+      const store = new CoAgentHubSettingsStore(null)
+      store.set({
+        activeGroupId: 'g1',
+        mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' },
+      })
+      const client = clientWith(() =>
+        Promise.resolve({ items: [group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub')], total: 1 }),
+      )
+      const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+      const result = (await tool.execute({}, {
+        agent: { session: { meta: { cwd: dir } } },
+      } as never)) as Record<string, unknown>
+      expect(result).toEqual(expect.objectContaining({
+        groupId: 'g1',
+        groupTitle: 'dsh-coagenthub 插件开发',
+        projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
+        winPath: 'Z:\\dsh-coagenthub',
+        instructions: '工作区指令',
+      }))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
