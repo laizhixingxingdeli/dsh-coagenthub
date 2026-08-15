@@ -292,4 +292,19 @@ describe('workspace cwd lookup pure functions', () => {
     expect(findGroupByWorkspaceCwd(groups, 'D:\\nowhere', undefined)).toBeNull()
     expect(findGroupByWorkspaceCwd(groups, null, rule)).toBeNull()
   })
+
+  it('findGroupByWorkspaceCwd matches a Mac/POSIX cwd directly against projectPath (trailing slash ignored)', () => {
+    const rule = { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Y:\\' }
+    const groups: GroupWithPath[] = [
+      { id: 'g1', title: 'mapped', projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub' },
+      { id: 'g2', title: 'other', projectPath: '/Users/apple/Desktop/Projects/deepseek-harness' },
+      { id: 'g3', title: 'no-path', projectPath: null },
+    ]
+    expect(findGroupByWorkspaceCwd(groups, '/Users/apple/Desktop/Projects/dsh-coagenthub', rule)?.id).toBe('g1')
+    expect(findGroupByWorkspaceCwd(groups, '/Users/apple/Desktop/Projects/dsh-coagenthub/', undefined)?.id).toBe('g1')
+    expect(findGroupByWorkspaceCwd(groups, '/Users/apple/Desktop/Projects/deepseek-harness/', rule)?.id).toBe('g2')
+    expect(findGroupByWorkspaceCwd(groups, '/Users/apple/Desktop/Projects/nope', rule)).toBeNull()
+    // Windows 路径仍走原逻辑,不被 POSIX 分支误判。
+    expect(findGroupByWorkspaceCwd(groups, 'Y:\\dsh-coagenthub', rule)?.id).toBe('g1')
+  })
 })

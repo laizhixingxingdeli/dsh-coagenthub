@@ -61,8 +61,8 @@ function messageView(message: Message) {
   }
 }
 
-function summarizeBrief(brief: string): string {
-  const trimmed = brief.trim()
+function summarizeBrief(brief: string | null | undefined): string {
+  const trimmed = (brief ?? '').trim()
   if (trimmed.length <= BRIEF_SUMMARY_LIMIT) return trimmed
   return `${trimmed.slice(0, BRIEF_SUMMARY_LIMIT)}…`
 }
@@ -275,10 +275,10 @@ const NOTIFICATION_VIEW_SCHEMA = {
       enum: ['task.completed', 'task.failed', 'task.stalled', 'task.status_changed', 'message.received'],
     },
     groupId: { type: 'string', required: true },
-    taskId: { type: 'string' },
-    status: { type: 'string' },
-    executorName: { type: 'string' },
-    summary: { type: 'string' },
+    taskId: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+    status: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+    executorName: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+    summary: { oneOf: [{ type: 'string' }, { type: 'null' }] },
     time: { type: 'string', required: true },
   },
 } as const
@@ -585,12 +585,18 @@ export function createCoAgentHubTools(
       output: { schema: GROUP_DETAIL_VIEW_SCHEMA, render: renderValue },
       async execute(args: { groupId: string }) {
         const group = await client.getGroup(args.groupId)
+        // members 归一化:每项 { id, name, device },缺失字段补 null,
+        // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
         return {
           id: group.id,
           title: group.title,
           status: group.status,
           projectPath: group.projectPath ?? null,
-          members: group.members,
+          members: (group.members ?? []).map(member => ({
+            id: member.id,
+            name: member.name,
+            device: member.device ?? null,
+          })),
         }
       },
     }),
@@ -714,7 +720,17 @@ export function createCoAgentHubTools(
       parameters: {},
       output: { schema: { type: 'array', items: NOTIFICATION_VIEW_SCHEMA } as const, render: renderValue },
       async execute() {
-        return notificationQueue.drain()
+        // 归一化:drain() 结果中缺省的 taskId/status/executorName/summary 补 null,
+        // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
+        return notificationQueue.drain().map(notification => ({
+          type: notification.type,
+          groupId: notification.groupId,
+          taskId: notification.taskId ?? null,
+          status: notification.status ?? null,
+          executorName: notification.executorName ?? null,
+          summary: notification.summary ?? null,
+          time: notification.time,
+        }))
       },
     }),
   ]

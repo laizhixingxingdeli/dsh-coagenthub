@@ -208,6 +208,41 @@ describe('createCoAgentHubTools', () => {
     expect(task.summary.endsWith('…')).toBe(true)
   })
 
+  it('list_tasks tolerates a missing brief (undefined/null) and returns an empty summary', async () => {
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).includes('/tasks')) {
+        return Promise.resolve([
+          {
+            id: 't1',
+            groupId: 'g1',
+            status: 'running',
+            executorParticipantId: 'e-atom',
+            brief: undefined,
+            createdAt: '2026-08-14T00:00:00.000Z',
+            updatedAt: '2026-08-14T00:01:00.000Z',
+          },
+          {
+            id: 't2',
+            groupId: 'g1',
+            status: 'queued',
+            executorParticipantId: 'e-atom',
+            brief: null,
+            createdAt: '2026-08-14T00:00:00.000Z',
+            updatedAt: '2026-08-14T00:01:00.000Z',
+          },
+        ])
+      }
+      return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_list_tasks')!
+    const result = (await execute(tool, { groupId: 'g1' })) as Array<{ summary: string }>
+    expect(result).toHaveLength(2)
+    for (const task of result) {
+      expect(task.summary).toBe('')
+      expect(Object.values(task).some(value => value === undefined)).toBe(false)
+    }
+  })
+
   it('list_tasks requires a groupId', async () => {
     const client = clientWith(() => Promise.resolve([]))
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_list_tasks')!
@@ -287,9 +322,33 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       title: 'A',
       status: 'active',
       projectPath: '/mac/a',
-      members: [{ id: 'm1', name: 'AtomCode 执行器' }],
+      members: [{ id: 'm1', name: 'AtomCode 执行器', device: null }],
     })
     expect(Object.values(result).some(value => value === undefined)).toBe(false)
+  })
+
+  it('get_group normalizes members: missing device becomes null, no undefined fields', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        ...group('g1', 'A', 'active', '/mac/a'),
+        members: [
+          { id: 'm1', name: 'AtomCode 执行器' },
+          { id: 'm2', name: 'Win dsh', device: 'windows' },
+          { id: 'm3', name: '无设备', device: null },
+        ],
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group')!
+    const result = (await execute(tool, { groupId: 'g1' })) as {
+      members: Array<{ id: string; name: string; device: string | null }>
+    }
+    expect(result.members).toEqual([
+      { id: 'm1', name: 'AtomCode 执行器', device: null },
+      { id: 'm2', name: 'Win dsh', device: 'windows' },
+      { id: 'm3', name: '无设备', device: null },
+    ])
+    // 返回对象不得携带值为 undefined 的字段(序列化安全)。
+    expect(JSON.stringify(result).includes('undefined')).toBe(false)
   })
 
   it('get_group outputs null (not undefined) when projectPath is absent', async () => {
@@ -494,6 +553,37 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(second).toEqual([])
   })
 
+  it('get_notifications normalizes missing fields to null (no undefined values)', async () => {
+    notificationQueue.drain() // 清空共享队列,避免用例间串扰
+    notificationQueue.enqueue({ type: 'message.received', groupId: 'g1', time: 't' })
+    notificationQueue.enqueue({
+      type: 'task.failed',
+      groupId: 'g1',
+      taskId: 't1',
+      status: 'failed',
+      executorName: 'AtomCode 执行器',
+      summary: '构建失败',
+      time: 't2',
+    })
+    const client = clientWith(() => Promise.resolve([]))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await execute(tool, {})) as Array<Record<string, unknown>>
+    expect(result).toEqual([
+      { type: 'message.received', groupId: 'g1', taskId: null, status: null, executorName: null, summary: null, time: 't' },
+      {
+        type: 'task.failed',
+        groupId: 'g1',
+        taskId: 't1',
+        status: 'failed',
+        executorName: 'AtomCode 执行器',
+        summary: '构建失败',
+        time: 't2',
+      },
+    ])
+    // 返回数组不得携带值为 undefined 的字段(序列化安全)。
+    expect(JSON.stringify(result).includes('undefined')).toBe(false)
+  })
+
   it('dispatch_task renders structured fields into the task book body', async () => {
     const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
     const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
@@ -617,6 +707,27 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       groupTitle: 'dsh-coagenthub 插件开发',
       projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
       winPath: 'Y:\\dsh-coagenthub',
+    }))
+  })
+
+  it('get_active_group matches a Mac/POSIX cwd via projectPath and returns the mapped winPath', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await tool.execute({}, {
+      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub/' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({
+      groupId: 'g1',
+      groupTitle: 'dsh-coagenthub 插件开发',
+      projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
+      winPath: 'Z:\\dsh-coagenthub',
     }))
   })
 

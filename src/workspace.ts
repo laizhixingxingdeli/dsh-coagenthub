@@ -157,8 +157,10 @@ export function groupProjectWinPath(
 /**
  * Find the first group whose projectPath — mapped through the rule when
  * possible, else its own Windows local absolute path — matches the session
- * cwd as a Windows path. Groups without a usable projectPath are skipped;
- * null when nothing matches.
+ * cwd as a Windows path; when the cwd is itself a Mac/POSIX path, compare it
+ * directly against each group's projectPath (normalized, trailing separators
+ * ignored). Groups without a usable projectPath are skipped; null when
+ * nothing matches.
  */
 export function findGroupByWorkspaceCwd(
   groups: readonly GroupWithPath[],
@@ -166,11 +168,29 @@ export function findGroupByWorkspaceCwd(
   mappingRule: PathMappingRule | undefined,
 ): GroupWithPath | null {
   if (cwd === null || cwd === undefined || cwd.trim() === '') return null
+  const posixCwd = isPosixLocalPath(cwd) ? normalizePosixPath(cwd) : null
   for (const group of groups) {
     const winPath = groupProjectWinPath(group.projectPath, mappingRule)
     if (winPath !== null && sameWindowsPath(winPath, cwd)) return group
+    // Mac/POSIX 会话路径:直接与 group.projectPath 归一化比较(忽略末尾分隔符)。
+    if (
+      posixCwd !== null
+      && group.projectPath !== null && group.projectPath !== undefined
+      && normalizePosixPath(group.projectPath) === posixCwd
+    ) return group
   }
   return null
+}
+
+/** True when the path is a POSIX-style absolute path (leading `/`, no drive letter). */
+function isPosixLocalPath(path: string): boolean {
+  const trimmed = path.trim()
+  return trimmed.startsWith('/') && !isWindowsLocalPath(trimmed)
+}
+
+/** Normalize a POSIX path for comparison: trim and drop trailing separators. */
+function normalizePosixPath(path: string): string {
+  return path.trim().replace(/\/+$/, '')
 }
 
 /** Build the mapping rule for a drive letter; null when no common prefix. */
