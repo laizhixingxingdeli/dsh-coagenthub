@@ -9,7 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CoAgentHubClient } from './client.ts'
 import { getCoAgentHubSettingsStore } from './config.ts'
-import { DshAgentPushAdapter, NullPushAdapter, createNotificationDeliverer, type PushAdapter } from './notify.ts'
+import { DshAgentPushAdapter, NullPushAdapter, createNotificationDeliverer } from './notify.ts'
 import { TaskWatcher } from './task-watcher.ts'
 import { registerCoAgentHubTools } from './tools.ts'
 import { CoAgentHubWsClient } from './ws-client.ts'
@@ -42,8 +42,42 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   // dsh 运行时暴露 ctx.agents 注册表时,用 agent.followup 排队 next-turn
   // 消息并唤醒当前会话;否则回退 NullPushAdapter 入队,由
   // coagenthub_get_notifications 补读。
-  const adapter = buildPushAdapter(ctx)
-  const deliverer = createNotificationDeliverer(adapter)
+  const log = (message: string) => ctx.logger?.('coagenthub').info(message)
+  const nullAdapter = () => new NullPushAdapter({
+    reason: 'dsh 运行时未暴露 ctx.agents 注册表(无 agent.followup 唤醒能力)',
+    log,
+  })
+  // 通知 deliverer 起步为队列回退;agents 服务可用后动态切到主动推送。
+  const deliverer = createNotificationDeliverer(nullAdapter())
+
+  // 动态注入 agents 服务:插件静态 inject 仅声明 ['tools'](避免没有该服务的
+  // profile 启动失败),而 cordis 4 对未注入属性访问会抛 "cannot get property
+  // "agents" without inject",不能直接读 ctx.agents。参考 proxy.ts 对
+  // webServer 的 ctx.inject([...], cb) 用法:agents 服务可用(启动时已提供或
+  // 后续出现)时,把通知 deliverer 切换到 DshAgentPushAdapter——每次推送经
+  // registry.roots()[0] 现查 live agent 并 agent.followup 唤醒;不可用时保持
+  // NullPushAdapter 回退并打 warn 说明原因。
+  if (ctx.reflect.get('agents', false) === undefined) {
+    ctx.logger?.('coagenthub').warn('dsh 运行时未暴露 ctx.agents 注册表,主动推送不可用;通知入队由 coagenthub_get_notifications 补读')
+  }
+  // ctx.inject 创建的注入 fiber 会自注册为插件 fiber 的子 effect(cordis Fiber
+  // 构造时 parent.fiber.effect),插件卸载时级联卸载,无需额外清理。
+  void ctx.inject(['agents'], (agentsCtx) => {
+    const registry = (agentsCtx as Context & { agents: { roots(): Agent[] } }).agents
+    ctx.logger?.('coagenthub').info('dsh 运行时支持主动唤醒(agent.followup),通知将直接推送进会话并唤醒 driver')
+    deliverer.setPushAdapter(new DshAgentPushAdapter({
+      resolveAgent: () => registry.roots()[0],
+      log,
+    }))
+    // 作为注入 fiber 的清理函数返回:agents 服务下线(而非仅插件卸载)时,
+    // cordis 会卸载该 fiber 并调用它,把 deliverer 回退到队列模式,避免继续
+    // 使用已失效的注册表;服务重新出现时 fiber 重载,重新切换回 followup。
+    return () => {
+      ctx.logger?.('coagenthub').warn('dsh 运行时 agents 服务已下线,主动推送回退队列;通知由 coagenthub_get_notifications 补读')
+      deliverer.setPushAdapter(nullAdapter())
+    }
+  })
+
   const ws = new CoAgentHubWsClient({
     baseURL: client.baseURL,
     // 每次(重)连时重新解析 apiBase,设置面板改地址后即时生效。
@@ -63,37 +97,4 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     },
     'coagenthub.task-watcher()',
   )
-}
-
-/**
- * 探测 dsh 运行时唤醒能力并选择推送适配器。后台插件上下文没有稳定 agent
- * 句柄(`ctx.agent` 仅在 agent 作用域上下文中存在),因此通过 `ctx.agents`
- * 注册表在每次推送时解析 live agent(root)。运行时未暴露注册表时回退
- * NullPushAdapter(入队 + 日志说明原因)。
- */
-function buildPushAdapter(ctx: Context): PushAdapter {
-  const log = (message: string) => ctx.logger?.('coagenthub').info(message)
-  // cordis 4 要求服务先声明注入才能读取;后台插件上下文未注入 agents 服务时,
-  // 直接读 ctx.agents 会抛 "cannot get property "agents" without inject",
-  // 导致 dsh web 重启后插件启动失败。因此 try/catch 安全探测:注册表可用则
-  // 主动推送,否则回退 NullPushAdapter 入队,由 get_notifications 补读。
-  let probed: { roots(): Agent[] } | undefined
-  try {
-    probed = (ctx as Context & { agents?: { roots(): Agent[] } }).agents
-  } catch {
-    probed = undefined
-  }
-  const registry = probed
-  if (registry !== undefined && typeof registry.roots === 'function') {
-    ctx.logger?.('coagenthub').info('dsh 运行时支持主动唤醒(agent.followup),通知将直接推送进会话并唤醒 driver')
-    return new DshAgentPushAdapter({
-      resolveAgent: () => registry.roots()[0],
-      log,
-    })
-  }
-  ctx.logger?.('coagenthub').warn('dsh 运行时未暴露 ctx.agents 注册表,主动推送不可用;通知入队由 coagenthub_get_notifications 补读')
-  return new NullPushAdapter({
-    reason: 'dsh 运行时未暴露 ctx.agents 注册表(无 agent.followup 唤醒能力)',
-    log,
-  })
 }

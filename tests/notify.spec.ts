@@ -157,4 +157,59 @@ describe('createNotificationDeliverer', () => {
     expect(pushed).toHaveLength(1)
     expect(notificationQueue.size).toBe(0)
   })
+
+  it('switches to followup push at runtime via setPushAdapter', () => {
+    // 起步为队列回退;agents 服务出现后运行时切换到 DshAgentPushAdapter。
+    const deliverer = createNotificationDeliverer()
+    deliverer.deliver(makeNotification())
+    expect(notificationQueue.size).toBe(1)
+
+    const agent = agentStub('agent-1')
+    deliverer.setPushAdapter(new DshAgentPushAdapter({ resolveAgent: () => asAgent(agent) }))
+    deliverer.deliver(makeNotification({ taskId: 't2' }))
+
+    // 切换后走 followup,不再入队。
+    expect(agent.followup).toHaveBeenCalledTimes(1)
+    expect(notificationQueue.size).toBe(1)
+  })
+
+  it('falls back to the queue when the runtime-switched adapter throws', () => {
+    const agent = agentStub('agent-1')
+    agent.followup.mockImplementation(() => {
+      throw new Error('followup failed')
+    })
+    const deliverer = createNotificationDeliverer()
+    deliverer.setPushAdapter(new DshAgentPushAdapter({ resolveAgent: () => asAgent(agent) }))
+
+    deliverer.deliver(makeNotification())
+
+    // 切换后的适配器抛错:不丢通知,回落队列补读。
+    expect(notificationQueue.size).toBe(1)
+    expect(notificationQueue.drain()[0]).toMatchObject({ taskId: 't1' })
+  })
+
+  it('switches back to queue-only mode via setPushAdapter(undefined)', () => {
+    const agent = agentStub('agent-1')
+    const deliverer = createNotificationDeliverer(new DshAgentPushAdapter({ resolveAgent: () => asAgent(agent) }))
+    deliverer.deliver(makeNotification())
+    expect(agent.followup).toHaveBeenCalledTimes(1)
+
+    deliverer.setPushAdapter(undefined)
+    deliverer.deliver(makeNotification())
+
+    expect(notificationQueue.size).toBe(1)
+  })
+
+  it('accepts a bare push function via setPushAdapter (legacy call shape)', () => {
+    const pushed: CoAgentHubNotification[] = []
+    const deliverer = createNotificationDeliverer()
+    deliverer.setPushAdapter((notification) => {
+      pushed.push(notification)
+    })
+
+    deliverer.deliver(makeNotification())
+
+    expect(pushed).toHaveLength(1)
+    expect(notificationQueue.size).toBe(0)
+  })
 })

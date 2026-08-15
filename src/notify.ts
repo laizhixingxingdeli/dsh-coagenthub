@@ -135,19 +135,28 @@ export interface NotificationDeliverer {
   enqueue(notification: CoAgentHubNotification): void
   /** Push first when an active pusher is wired; on any failure, queue. */
   deliver(notification: CoAgentHubNotification): void
+  /** Switch the active push adapter at runtime (wake-up capability may appear later). */
+  setPushAdapter(adapter?: PushAdapter | NotificationPush): void
   /** Return and clear the pending queue. */
   drain(): CoAgentHubNotification[]
+}
+
+/** Derive the push function from an adapter instance or a legacy bare function. */
+function toPush(adapter?: PushAdapter | NotificationPush): NotificationPush | undefined {
+  return typeof adapter === 'function'
+    ? adapter
+    : adapter?.push.bind(adapter)
 }
 
 /**
  * Build a deliverer; `adapter` may be a {@link PushAdapter} (preferred) or a
  * bare push function (legacy call shape). When absent, delivery is
- * queue-only fallback mode.
+ * queue-only fallback mode. The active adapter can be swapped at runtime via
+ * {@link NotificationDeliverer.setPushAdapter} — e.g. when the dsh `agents`
+ * service becomes available after plugin load — without losing queued state.
  */
 export function createNotificationDeliverer(adapter?: PushAdapter | NotificationPush): NotificationDeliverer {
-  const push: NotificationPush | undefined = typeof adapter === 'function'
-    ? adapter
-    : adapter?.push.bind(adapter)
+  let push: NotificationPush | undefined = toPush(adapter)
   return {
     enqueue(notification) {
       notificationQueue.enqueue(notification)
@@ -169,6 +178,9 @@ export function createNotificationDeliverer(adapter?: PushAdapter | Notification
         }
       }
       notificationQueue.enqueue(notification)
+    },
+    setPushAdapter(adapter?: PushAdapter | NotificationPush) {
+      push = toPush(adapter)
     },
     drain() {
       return notificationQueue.drain()

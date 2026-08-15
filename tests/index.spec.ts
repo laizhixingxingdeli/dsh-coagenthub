@@ -47,7 +47,7 @@ describe('plugin startup', () => {
     expect(warn).toBeTruthy()
   })
 
-  it('still uses active push when the agents registry is available', async () => {
+  it('dynamically injects agents and enables followup push when the registry is available', async () => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
     const ctx = new Context()
     ctx.provide('tools', toolsStub())
@@ -56,9 +56,36 @@ describe('plugin startup', () => {
 
     const fiber = ctx.plugin({ name, inject, apply }, { apiBase: 'http://127.0.0.1:9/api' })
     await expect(fiber).resolves.toBeDefined()
+
+    // 动态注入(ctx.inject)是异步回调:等待 agents 服务接线后切到 followup 推送。
+    await vi.waitFor(() => {
+      expect(logs.some(log => log.type === 'info' && String(log.args[0]).includes('支持主动唤醒'))).toBe(true)
+    })
     await fiber.dispose()
 
-    const info = logs.find(log => log.type === 'info' && String(log.args[0]).includes('支持主动唤醒'))
-    expect(info).toBeTruthy()
+    // agents 可用时不应出现降级 warn。
+    const warn = logs.find(log => log.type === 'warn' && String(log.args[0]).includes('未暴露 ctx.agents 注册表'))
+    expect(warn).toBeUndefined()
+  })
+
+  it('falls back to queue delivery when the agents service is removed after wiring', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const ctx = new Context()
+    ctx.provide('tools', toolsStub())
+    const disposeAgents = ctx.provide('agents', { roots: () => [{ id: 'agent-1' }], list: () => [] })
+    const logs = captureLogs(ctx)
+
+    const fiber = ctx.plugin({ name, inject, apply }, { apiBase: 'http://127.0.0.1:9/api' })
+    await expect(fiber).resolves.toBeDefined()
+    await vi.waitFor(() => {
+      expect(logs.some(log => log.type === 'info' && String(log.args[0]).includes('支持主动唤醒'))).toBe(true)
+    })
+
+    // agents 服务下线:注入 fiber 卸载,通知回退队列(插件保持存活、不丢通知)。
+    await disposeAgents()
+    await vi.waitFor(() => {
+      expect(logs.some(log => log.type === 'warn' && String(log.args[0]).includes('agents 服务已下线'))).toBe(true)
+    })
+    await fiber.dispose()
   })
 })
