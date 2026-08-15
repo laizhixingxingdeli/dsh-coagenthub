@@ -14,12 +14,20 @@ export const WORKSPACE_INSTRUCTIONS_FILE = 'COAGENTHUB.md'
 
 /** Minimal structural face of a tool exec context (agent session metadata). */
 export interface WorkspaceExecLike {
-  agent?: { session?: { meta?: { cwd?: string } } }
+  agent?: {
+    session?: {
+      /** 会话头字段(优先):当前 dsh 会话的已校验 cwd 在这里。 */
+      header?: { cwd?: string }
+      /** 兼容回退:旧结构里 cwd 在 meta 下。 */
+      meta?: { cwd?: string }
+    }
+  }
 }
 
 /**
- * Resolve the current workspace root from a tool exec context (the agent
- * session's validated cwd). Falls back to `process.cwd()` for headless runs
+ * Resolve the current workspace root from a tool exec context. Prefers
+ * `agent.session.header.cwd` (the validated session cwd), falling back to the
+ * legacy `agent.session.meta.cwd`, then to `process.cwd()` for headless runs
  * where the exec carries no agent; null when neither is usable.
  *
  * `exec` is typed `unknown` because the real `ToolRunContext.agent` type is
@@ -28,7 +36,8 @@ export interface WorkspaceExecLike {
  */
 export function workspaceRootFromExec(exec: unknown): string | null {
   const ctx = exec as WorkspaceExecLike | undefined
-  const cwd = ctx?.agent?.session?.meta?.cwd
+  const session = ctx?.agent?.session
+  const cwd = session?.header?.cwd ?? session?.meta?.cwd
   if (cwd !== undefined && cwd !== null && cwd.trim() !== '') return cwd
   try {
     const fallback = process.cwd()

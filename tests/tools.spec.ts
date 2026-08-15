@@ -233,10 +233,10 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       }),
     )
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_list_groups')!
-    const all = (await execute(tool, {})) as Array<{ id: string; projectPath?: string }>
+    const all = (await execute(tool, {})) as Array<{ id: string; projectPath?: string | null }>
     expect(all).toEqual([
       { id: 'g1', title: 'A', status: 'active', projectPath: '/mac/a' },
-      { id: 'g2', title: 'B', status: 'archived', projectPath: undefined },
+      { id: 'g2', title: 'B', status: 'archived', projectPath: null },
     ])
     const active = (await execute(tool, { status: 'active' })) as Array<{ id: string }>
     expect(active.map(item => item.id)).toEqual(['g1'])
@@ -268,6 +268,26 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       projectPath: '/mac/a',
       members: [{ id: 'm1', name: 'AtomCode 执行器' }],
     })
+    expect(Object.values(result).some(value => value === undefined)).toBe(false)
+  })
+
+  it('get_group outputs null (not undefined) when projectPath is absent', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        ...group('g2', 'B', 'active', null),
+        members: [],
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group')!
+    const result = (await execute(tool, { groupId: 'g2' })) as Record<string, unknown>
+    expect(result).toEqual({
+      id: 'g2',
+      title: 'B',
+      status: 'active',
+      projectPath: null,
+      members: [],
+    })
+    expect(Object.values(result).some(value => value === undefined)).toBe(false)
   })
 
   it('list_executors maps executors to the view shape', async () => {
@@ -284,12 +304,16 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       agentName: 'AtomCode 执行器',
       kind: 'cli',
       bin: '/usr/bin/node',
-      url: undefined,
+      url: null,
       model: 'deepseek',
-      device: undefined,
-      online: undefined,
+      device: null,
+      online: null,
     })
     expect(result[1]).toMatchObject({ device: 'windows', online: true })
+    // 返回对象不得携带值为 undefined 的字段(序列化安全)。
+    for (const executor of result) {
+      expect(Object.values(executor).some(value => value === undefined)).toBe(false)
+    }
   })
 
   it('get_task resolves executorName and carries attempts / diffSummary / outputTail', async () => {
@@ -321,6 +345,63 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       attempts: task.attempts,
       outputTail: 'tail',
     }))
+  })
+
+  it('get_task normalizes attempts to schema: missing error/summary/hash become null', async () => {
+    // 服务端 attempt 缺省 error/summary/hash(undefined):schema 中 required: true,
+    // 缺字段会违反;归一化后补 null,值为 null 不违反 schema。
+    const task = {
+      id: 't1',
+      groupId: 'g1',
+      status: 'failed',
+      executorParticipantId: 'e-atom',
+      brief: '实现登录页',
+      retryCount: 2,
+      attempts: [
+        { n: 1, startedAt: 'a', endedAt: null, status: 'failed' },
+        { n: 2, startedAt: 'b', endedAt: 'c', status: 'running', error: '脚本崩溃', summary: 's', hash: 'h' },
+      ],
+      diffSummary: null,
+      createdAt: 'c',
+      updatedAt: 'u',
+    }
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).includes('/tasks/t1')) return Promise.resolve(task)
+      return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_task')!
+    const result = (await execute(tool, { groupId: 'g1', taskId: 't1' })) as Record<string, unknown>
+    expect(result.attempts).toEqual([
+      { n: 1, startedAt: 'a', endedAt: null, status: 'failed', error: null, summary: null, hash: null },
+      { n: 2, startedAt: 'b', endedAt: 'c', status: 'running', error: '脚本崩溃', summary: 's', hash: 'h' },
+    ])
+    expect(result.diffSummary).toBeNull()
+    expect(result.outputTail).toBeNull()
+    // 返回对象不得携带值为 undefined 的字段(序列化安全)。
+    expect(JSON.stringify(result).includes('undefined')).toBe(false)
+  })
+
+  it('get_task keeps diffSummary fields when present and lifts outputTail to the top', async () => {
+    const task = {
+      id: 't1',
+      groupId: 'g1',
+      status: 'done',
+      executorParticipantId: 'e-atom',
+      brief: '实现登录页',
+      retryCount: 1,
+      attempts: [{ n: 1, startedAt: 'a', endedAt: 'b', status: 'done', error: null, summary: 's', hash: 'h' }],
+      diffSummary: { summary: '完成', hash: 'abc1234', error: null, outputTail: 'tail' },
+      createdAt: 'c',
+      updatedAt: 'u',
+    }
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).includes('/tasks/t1')) return Promise.resolve(task)
+      return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_task')!
+    const result = (await execute(tool, { groupId: 'g1', taskId: 't1' })) as Record<string, unknown>
+    expect(result.diffSummary).toEqual({ summary: '完成', hash: 'abc1234', error: null })
+    expect(result.outputTail).toBe('tail')
   })
 
   it('get_notifications returns and clears the pending queue', async () => {

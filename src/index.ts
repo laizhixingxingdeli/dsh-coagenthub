@@ -72,7 +72,17 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
  */
 function buildPushAdapter(ctx: Context): PushAdapter {
   const log = (message: string) => ctx.logger?.('coagenthub').info(message)
-  const registry = (ctx as Context & { agents?: { roots(): Agent[] } }).agents
+  // cordis 4 要求服务先声明注入才能读取;后台插件上下文未注入 agents 服务时,
+  // 直接读 ctx.agents 会抛 "cannot get property "agents" without inject",
+  // 导致 dsh web 重启后插件启动失败。因此 try/catch 安全探测:注册表可用则
+  // 主动推送,否则回退 NullPushAdapter 入队,由 get_notifications 补读。
+  let probed: { roots(): Agent[] } | undefined
+  try {
+    probed = (ctx as Context & { agents?: { roots(): Agent[] } }).agents
+  } catch {
+    probed = undefined
+  }
+  const registry = probed
   if (registry !== undefined && typeof registry.roots === 'function') {
     ctx.logger?.('coagenthub').info('dsh 运行时支持主动注入(agent.inject),通知将直接推送进会话')
     return new DshAgentPushAdapter({

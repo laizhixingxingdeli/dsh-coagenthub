@@ -530,7 +530,7 @@ export function createCoAgentHubTools(
           id: group.id,
           title: group.title,
           status: group.status,
-          projectPath: group.projectPath ?? undefined,
+          projectPath: group.projectPath ?? null,
         }))
       },
     }),
@@ -549,7 +549,7 @@ export function createCoAgentHubTools(
           id: group.id,
           title: group.title,
           status: group.status,
-          projectPath: group.projectPath ?? undefined,
+          projectPath: group.projectPath ?? null,
           members: group.members,
         }
       },
@@ -566,12 +566,12 @@ export function createCoAgentHubTools(
         return executors.map(executor => ({
           key: executor.key,
           agentName: executor.agentName,
-          kind: executor.kind ?? undefined,
-          bin: executor.bin ?? undefined,
-          url: executor.url ?? undefined,
-          model: executor.model ?? undefined,
-          device: executor.device ?? undefined,
-          online: executor.online ?? undefined,
+          kind: executor.kind ?? null,
+          bin: executor.bin ?? null,
+          url: executor.url ?? null,
+          model: executor.model ?? null,
+          device: executor.device ?? null,
+          online: executor.online ?? null,
         }))
       },
     }),
@@ -591,6 +591,9 @@ export function createCoAgentHubTools(
           client.listParticipants(),
         ])
         const nameById = new Map(participants.map(participant => [participant.id, participant.name]))
+        // 归一化后再返回:attempts 各项的 error/summary/hash 缺省时补 null
+        // (schema 中 required: true,字段缺失会违反;值为 null 则不违反),
+        // diffSummary 只保留 schema 声明的字段(outputTail 提到顶层)。
         return {
           id: task.id,
           status: task.status,
@@ -600,9 +603,23 @@ export function createCoAgentHubTools(
           createdAt: task.createdAt,
           updatedAt: task.updatedAt,
           retryCount: task.retryCount,
-          attempts: task.attempts ?? [],
-          diffSummary: task.diffSummary,
-          outputTail: task.diffSummary?.outputTail ?? undefined,
+          attempts: (task.attempts ?? []).map(attempt => ({
+            n: attempt.n,
+            startedAt: attempt.startedAt,
+            endedAt: attempt.endedAt ?? null,
+            status: attempt.status,
+            error: attempt.error ?? null,
+            summary: attempt.summary ?? null,
+            hash: attempt.hash ?? null,
+          })),
+          diffSummary: task.diffSummary === null || task.diffSummary === undefined
+            ? null
+            : {
+                summary: task.diffSummary.summary ?? null,
+                hash: task.diffSummary.hash ?? null,
+                error: task.diffSummary.error ?? null,
+              },
+          outputTail: task.diffSummary?.outputTail ?? null,
         }
       },
     }),
