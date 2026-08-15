@@ -22,6 +22,17 @@ export const SUMMARY_LIMIT = 60
 export const BRIEF_LIMIT = 400
 export const OUTPUT_LIMIT = 8000
 
+/** One attempt in a task's retry timeline (from the API `attempts` payload). */
+export interface CoAgentHubTaskAttempt {
+  n: number
+  startedAt: string
+  endedAt: string | null
+  status: string
+  error: string | null
+  summary: string | null
+  hash: string | null
+}
+
 /** Minimal task shape read from `GET {apiBase}/groups/:id/tasks?includeOutput=1`. */
 export interface CoAgentHubTaskView {
   id: string
@@ -35,18 +46,41 @@ export interface CoAgentHubTaskView {
     error: string | null
     outputTail?: string | null
   } | null
-  attempts: Array<{
-    n: number
-    startedAt: string
-    endedAt: string | null
-    status: string
-    error: string | null
-    summary: string | null
-    hash: string | null
-  }>
+  /** 执行历史。服务端任务列表原始行不含该字段,经 `normalizeTaskView` 补齐为 `[]`。 */
+  attempts?: CoAgentHubTaskAttempt[]
   createdAt: string
   updatedAt: string
   retryCount: number
+}
+
+/** Raw task row from the server: display fields may be missing. */
+export interface CoAgentHubTaskInput {
+  id: string
+  status: string
+  executorKey?: string
+  executorLabel?: string
+  brief?: string
+  diffSummary?: CoAgentHubTaskView['diffSummary'] | null
+  attempts?: CoAgentHubTaskAttempt[] | null
+  createdAt?: string
+  updatedAt?: string
+  retryCount?: number
+}
+
+/** Normalize one raw task row so every display field has a safe default. */
+export function normalizeTaskView(raw: CoAgentHubTaskInput): CoAgentHubTaskView {
+  return {
+    id: raw.id,
+    status: raw.status,
+    executorKey: raw.executorKey ?? '',
+    executorLabel: raw.executorLabel ?? '',
+    brief: raw.brief ?? '',
+    diffSummary: raw.diffSummary ?? null,
+    attempts: raw.attempts ?? [],
+    createdAt: raw.createdAt ?? '',
+    updatedAt: raw.updatedAt ?? raw.createdAt ?? '',
+    retryCount: raw.retryCount ?? 0,
+  }
 }
 
 /** Panel props: only the API base is configurable; everything else is framework-injected. */
@@ -99,7 +133,7 @@ export function isBriefTruncated(task: CoAgentHubTaskView): boolean {
 }
 
 /** One attempt as `第 N 次 <status> <error> <hash>`, the timeline step text. */
-export function attemptStep(attempt: CoAgentHubTaskView['attempts'][number]): string {
+export function attemptStep(attempt: CoAgentHubTaskAttempt): string {
   const parts = [`第 ${attempt.n} 次`, statusLabel(attempt.status)]
   if (attempt.error !== null && attempt.error !== '') parts.push(attempt.error)
   if (attempt.hash !== null && attempt.hash !== '') parts.push(attempt.hash.slice(0, 7))
@@ -107,7 +141,7 @@ export function attemptStep(attempt: CoAgentHubTaskView['attempts'][number]): st
 }
 
 /** Render the attempt timeline as `第 1 次 失败 exit 1 → 第 2 次 成功 abc1234`. */
-export function attemptTimeline(attempts: CoAgentHubTaskView['attempts']): string {
+export function attemptTimeline(attempts: CoAgentHubTaskAttempt[]): string {
   return attempts.map(attemptStep).join(' → ')
 }
 
@@ -138,9 +172,9 @@ export async function fetchTasks(apiBase: string, groupId: string): Promise<CoAg
     const body = await response.text().catch(() => '')
     throw new Error(`HTTP ${response.status}${body !== '' ? `: ${body.slice(0, 200)}` : ''}`)
   }
-  const data = (await response.json()) as CoAgentHubTaskView[] | { items?: CoAgentHubTaskView[] } | null
-  if (Array.isArray(data)) return data
-  if (data !== null && typeof data === 'object' && Array.isArray(data.items)) return data.items
+  const data = (await response.json()) as CoAgentHubTaskInput[] | { items?: CoAgentHubTaskInput[] } | null
+  if (Array.isArray(data)) return data.map(normalizeTaskView)
+  if (data !== null && typeof data === 'object' && Array.isArray(data.items)) return data.items.map(normalizeTaskView)
   return []
 }
 
@@ -331,6 +365,7 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
           <ul className={css.list}>
             {tasks.map((task) => {
               const expanded = expandedId === task.id
+              const attempts = task.attempts ?? []
               const diffError = task.diffSummary?.error ?? null
               const diffOutput = task.diffSummary?.outputTail ?? null
               const fullBrief = (task.brief ?? '').trim()
@@ -403,11 +438,11 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
                         </div>
                       )}
 
-                      {task.attempts.length > 0 && (
+                      {attempts.length > 0 && (
                         <div className={css.section}>
                           <h4 className={css.sectionTitle}>执行历史</h4>
                           <ol className={css.timeline}>
-                            {task.attempts.map((attempt) => {
+                            {attempts.map((attempt) => {
                               const ok = attempt.status === 'done'
                               return (
                                 <li key={attempt.n} className={css.timelineItem}>

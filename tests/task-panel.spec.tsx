@@ -6,7 +6,9 @@ import {
   TASK_REFRESH_MS,
   attemptTimeline,
   capOutput,
+  fetchTasks,
   formatUpdatedAt,
+  normalizeTaskView,
   parseFinalReport,
   rawOutputUrl,
   statusLabel,
@@ -316,6 +318,26 @@ describe('CoAgentHubTaskPanel', () => {
     })
     expect(await screen.findByText('已复制')).toBeTruthy()
   })
+
+  it('renders rows from raw task rows that omit attempts and other display fields', async () => {
+    // 服务端任务表原始行没有 attempts / brief / executorKey / updatedAt 等展示字段
+    vi.stubGlobal('fetch', groupFetchMock([
+      { id: 't1', status: 'done', createdAt: '2026-08-14T10:00:00Z', retryCount: 0 },
+    ]))
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+
+    // 归一化后列表行正常渲染,展开详情不崩溃
+    const row = await screen.findByRole('button', { name: /已完成/ })
+    fireEvent.click(row)
+    const detail = screen.getByTestId('task-detail')
+
+    // 没有 attempts 时不渲染执行历史,也不报错
+    expect(within(detail).queryByText('执行历史')).toBeNull()
+    expect(within(detail).queryByText('第 1 次')).toBeNull()
+    expect(within(detail).queryByText('任务书')).toBeNull()
+  })
 })
 
 describe('CoAgentHubTaskPanel helpers', () => {
@@ -365,5 +387,90 @@ describe('CoAgentHubTaskPanel helpers', () => {
       遗留: null,
     })
     expect(parseFinalReport(null, null)).toEqual({ 提交: null, 测试: null, 汇报: null, 遗留: null })
+  })
+})
+
+describe('fetchTasks normalization', () => {
+  it('fills missing display fields with safe defaults', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([
+      { id: 't1', status: 'done', createdAt: '2026-08-14T10:00:00Z', retryCount: 0 },
+    ])))
+
+    const tasks = await fetchTasks(DEFAULT_API_BASE, 'g1')
+
+    expect(tasks).toEqual([{
+      id: 't1',
+      status: 'done',
+      executorKey: '',
+      executorLabel: '',
+      brief: '',
+      diffSummary: null,
+      attempts: [],
+      createdAt: '2026-08-14T10:00:00Z',
+      updatedAt: '2026-08-14T10:00:00Z',
+      retryCount: 0,
+    }])
+  })
+
+  it('falls back to createdAt when updatedAt is missing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([
+      { id: 't1', status: 'running', createdAt: '2026-08-14T10:00:00Z' },
+    ])))
+
+    const tasks = await fetchTasks(DEFAULT_API_BASE, 'g1')
+
+    expect(tasks[0]!.updatedAt).toBe('2026-08-14T10:00:00Z')
+  })
+
+  it('keeps attempts / diffSummary / executor fields when the server sends them', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([
+      {
+        id: 't1',
+        status: 'failed',
+        executorKey: 'atomcode',
+        brief: '实现登录页',
+        diffSummary: { summary: '提交: abc', hash: 'abc123456789', error: 'exit 1', outputTail: 'tail' },
+        attempts: [
+          { n: 1, startedAt: '2026-08-14T09:00:00Z', endedAt: '2026-08-14T09:01:00Z', status: 'failed', error: 'exit 1', summary: null, hash: null },
+        ],
+        createdAt: '2026-08-14T10:00:00Z',
+        updatedAt: '2026-08-14T11:00:00Z',
+        retryCount: 1,
+      },
+    ])))
+
+    const tasks = await fetchTasks(DEFAULT_API_BASE, 'g1')
+
+    expect(tasks[0]!.attempts).toHaveLength(1)
+    expect(tasks[0]!.diffSummary?.hash).toBe('abc123456789')
+    expect(tasks[0]!.executorKey).toBe('atomcode')
+    expect(tasks[0]!.updatedAt).toBe('2026-08-14T11:00:00Z')
+  })
+
+  it('normalizes the { items } response wrapper too', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      items: [{ id: 't1', status: 'done', createdAt: '2026-08-14T10:00:00Z' }],
+    })))
+
+    const tasks = await fetchTasks(DEFAULT_API_BASE, 'g1')
+
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]!.attempts).toEqual([])
+    expect(tasks[0]!.diffSummary).toBeNull()
+  })
+
+  it('normalizeTaskView maps a raw row to the full view shape', () => {
+    expect(normalizeTaskView({ id: 't1', status: 'queued' })).toEqual({
+      id: 't1',
+      status: 'queued',
+      executorKey: '',
+      executorLabel: '',
+      brief: '',
+      diffSummary: null,
+      attempts: [],
+      createdAt: '',
+      updatedAt: '',
+      retryCount: 0,
+    })
   })
 })
