@@ -61,6 +61,63 @@ describe('defaultConfigFilePath', () => {
   })
 })
 
+describe('CoAgentHubSettingsStore.set patch merge semantics', () => {
+  it('set({ apiBase }) keeps participantId / mappingRule / activeGroupId untouched', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({
+      apiBase: 'http://a:1/api',
+      participantId: 'win-1',
+      mappingRule: { macPrefix: '/m/', winPrefix: 'Z:\\' },
+      activeGroupId: 'g1',
+    })
+    store.set({ apiBase: 'http://b:2/api' })
+    expect(store.get()).toEqual({
+      apiBase: 'http://b:2/api',
+      participantId: 'win-1',
+      mappingRule: { macPrefix: '/m/', winPrefix: 'Z:\\' },
+      activeGroupId: 'g1',
+    })
+  })
+
+  it('set({ activeGroupId }) keeps apiBase / participantId / mappingRule untouched', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({
+      apiBase: 'http://a:1/api',
+      participantId: 'win-1',
+      mappingRule: { macPrefix: '/m/', winPrefix: 'Z:\\' },
+      activeGroupId: 'g1',
+    })
+    store.set({ activeGroupId: 'g2' })
+    expect(store.get()).toEqual({
+      apiBase: 'http://a:1/api',
+      participantId: 'win-1',
+      mappingRule: { macPrefix: '/m/', winPrefix: 'Z:\\' },
+      activeGroupId: 'g2',
+    })
+  })
+
+  it('set({ participantId: \'\' }) clears only participantId', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ apiBase: 'http://a:1/api', participantId: 'win-1', activeGroupId: 'g1' })
+    store.set({ participantId: '' })
+    expect(store.get()).toEqual({ apiBase: 'http://a:1/api', activeGroupId: 'g1' })
+  })
+
+  it('set({ apiBase: undefined }) treats the field as not provided and keeps the old value', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ apiBase: 'http://a:1/api' })
+    store.set({ apiBase: undefined, participantId: 'p-1' })
+    expect(store.get()).toEqual({ apiBase: 'http://a:1/api', participantId: 'p-1' })
+  })
+
+  it('set({ mappingRule: null }) clears the mapping rule', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/m/', winPrefix: 'Z:\\' }, activeGroupId: 'g1' })
+    store.set({ mappingRule: null } as never)
+    expect(store.get()).toEqual({ activeGroupId: 'g1' })
+  })
+})
+
 describe('CoAgentHubSettingsStore (fallback path)', () => {
   it('persists settings under ~/.dsh and reloads them after restart when DSH_HOME is unset', () => {
     const previousDshHome = process.env.DSH_HOME

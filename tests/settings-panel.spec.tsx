@@ -52,7 +52,7 @@ describe('CoAgentHubSettings', () => {
     expect(onSaved).toHaveBeenCalledTimes(1)
   })
 
-  it('saves empty inputs as unset fields (clears the settings)', async () => {
+  it('sends empty strings to clear the settings', async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ ok: true, settings: {} })))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -64,7 +64,7 @@ describe('CoAgentHubSettings', () => {
       expect(fetchMock).toHaveBeenCalledWith(SETTINGS_PATH, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ apiBase: '', participantId: '' }),
       })
     })
   })

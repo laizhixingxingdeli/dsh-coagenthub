@@ -109,15 +109,19 @@ export class CoAgentHubSettingsStore {
     return { ...this.settings }
   }
 
-  /** Merge a patch, persist best-effort, and apply immediately. */
+  /**
+   * Merge a patch, persist best-effort, and apply immediately.
+   * A key whose patch value is `undefined` counts as "not provided" and keeps
+   * its previous value; only explicitly provided values (including `''` or
+   * `null`) are written, so a partial PUT never wipes other settings.
+   */
   set(patch: CoAgentHubSettings): CoAgentHubSettings {
-    this.settings = clean({
-      ...this.settings,
-      apiBase: patch.apiBase,
-      participantId: patch.participantId,
-      mappingRule: patch.mappingRule,
-      activeGroupId: patch.activeGroupId,
-    })
+    const next: CoAgentHubSettings = { ...this.settings }
+    if (patch.apiBase !== undefined) next.apiBase = patch.apiBase
+    if (patch.participantId !== undefined) next.participantId = patch.participantId
+    if (patch.mappingRule !== undefined) next.mappingRule = patch.mappingRule
+    if (patch.activeGroupId !== undefined) next.activeGroupId = patch.activeGroupId
+    this.settings = clean(next)
     persistToDisk(this.filePath, this.settings)
     return this.get()
   }

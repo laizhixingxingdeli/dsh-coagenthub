@@ -128,8 +128,8 @@ export function CoAgentHubSettings({ onSaved }: CoAgentHubSettingsProps) {
   const handleSubmit = (event: FormEvent): void => {
     event.preventDefault()
     void saveSettings({
-      apiBase: apiBase.trim() === '' ? undefined : apiBase.trim(),
-      participantId: participantId.trim() === '' ? undefined : participantId.trim(),
+      apiBase: apiBase.trim() === '' ? '' : apiBase.trim(),
+      participantId: participantId.trim() === '' ? '' : participantId.trim(),
     }).then(
       () => {
         setSaveState({ kind: 'ready' })
