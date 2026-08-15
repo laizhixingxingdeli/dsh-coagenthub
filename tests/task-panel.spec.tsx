@@ -302,6 +302,168 @@ describe('CoAgentHubTaskPanel', () => {
     expect(tasksCalls()).toBe(2)
   })
 
+  it('shows the loading state on first load after selecting a group', async () => {
+    const resolvers: Array<(value: Response) => void> = []
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('/groups?')) {
+        return Promise.resolve(jsonResponse(groups([
+          { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+        ])))
+      }
+      return new Promise<Response>((resolve) => { resolvers.push(resolve) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+
+    expect(screen.getByText('加载中…')).toBeTruthy()
+    await act(async () => { resolvers[0]!(jsonResponse([task()])) })
+    expect(await screen.findByText('实现登录页')).toBeTruthy()
+  })
+
+  it('keeps the task list visible during a manual refresh (no flicker)', async () => {
+    const resolvers: Array<(value: Response) => void> = []
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('/groups?')) {
+        return Promise.resolve(jsonResponse(groups([
+          { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+        ])))
+      }
+      return new Promise<Response>((resolve) => { resolvers.push(resolve) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    await act(async () => { resolvers[0]!(jsonResponse([task()])) })
+    await screen.findByText('实现登录页')
+
+    // 手动刷新:第二次请求挂起期间旧列表仍然可见,不出现“加载中…”闪烁
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    expect(resolvers).toHaveLength(2)
+    expect(screen.queryByText('加载中…')).toBeNull()
+    expect(screen.getByText('实现登录页')).toBeTruthy()
+
+    await act(async () => { resolvers[1]!(jsonResponse([task({ id: 't2', brief: '刷新后的新任务' })])) })
+    expect(await screen.findByText('刷新后的新任务')).toBeTruthy()
+  })
+
+  it('keeps the task list visible during auto-refresh (no flicker)', async () => {
+    vi.useFakeTimers()
+    const resolvers: Array<(value: Response) => void> = []
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('/groups?')) {
+        return Promise.resolve(jsonResponse(groups([
+          { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+        ])))
+      }
+      return new Promise<Response>((resolve) => { resolvers.push(resolve) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubTaskPanel />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    fireEvent.change(screen.getByLabelText('选择群组'), { target: { value: 'g1' } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { resolvers[0]!(jsonResponse([task()])) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText('实现登录页')).toBeTruthy()
+
+    // 15s 自动刷新:第二次请求挂起期间旧列表仍然可见,不出现“加载中…”闪烁
+    await act(async () => { await vi.advanceTimersByTimeAsync(TASK_REFRESH_MS) })
+    expect(resolvers).toHaveLength(2)
+    expect(screen.queryByText('加载中…')).toBeNull()
+    expect(screen.getByText('实现登录页')).toBeTruthy()
+
+    await act(async () => { resolvers[1]!(jsonResponse([task({ id: 't2', brief: '自动刷新后的新任务' })])) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText('自动刷新后的新任务')).toBeTruthy()
+  })
+
+  it('keeps the previous list when a refresh fails', async () => {
+    let tasksCall = 0
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('/groups?')) {
+        return Promise.resolve(jsonResponse(groups([
+          { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+        ])))
+      }
+      tasksCall += 1
+      if (tasksCall === 1) return Promise.resolve(jsonResponse([task()]))
+      return Promise.reject(new TypeError('Failed to fetch'))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    await screen.findByText('实现登录页')
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await waitFor(() => expect(tasksCall).toBe(2))
+    await waitFor(() => expect(warnSpy).toHaveBeenCalled())
+
+    // 刷新失败:旧列表保留,无 error 提示、无 loading
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText('加载中…')).toBeNull()
+    expect(screen.getByText('实现登录页')).toBeTruthy()
+  })
+
+  it('shows loading instead of the previous group list when switching groups', async () => {
+    const resolvers: Array<(value: Response) => void> = []
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('/groups?')) {
+        return Promise.resolve(jsonResponse(groups([
+          { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+          { id: 'g2', title: '第二个群组', status: 'active' },
+        ])))
+      }
+      return new Promise<Response>((resolve) => { resolvers.push(resolve) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    await act(async () => { resolvers[0]!(jsonResponse([task()])) })
+    await screen.findByText('实现登录页')
+
+    // 切到 g2:显示 loading,不再保留 g1 的列表
+    fireEvent.change(screen.getByLabelText('选择群组'), { target: { value: 'g2' } })
+    expect(screen.getByText('加载中…')).toBeTruthy()
+    expect(screen.queryByText('实现登录页')).toBeNull()
+
+    await act(async () => { resolvers[1]!(jsonResponse([task({ id: 'g2-task', brief: '群组二的任务' })])) })
+    expect(await screen.findByText('群组二的任务')).toBeTruthy()
+  })
+
+  it('shows an error when switching to a group whose first load fails', async () => {
+    let tasksCall = 0
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes('/groups?')) {
+        return Promise.resolve(jsonResponse(groups([
+          { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
+          { id: 'g2', title: '第二个群组', status: 'active' },
+        ])))
+      }
+      tasksCall += 1
+      if (tasksCall === 1) return Promise.resolve(jsonResponse([task()]))
+      return Promise.reject(new TypeError('Failed to fetch'))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    await screen.findByText('实现登录页')
+
+    // 切到 g2 且首次加载失败:显示 error,而不是静默保留 g1 的列表
+    fireEvent.change(screen.getByLabelText('选择群组'), { target: { value: 'g2' } })
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe('任务加载失败:Failed to fetch')
+    })
+    expect(screen.queryByText('实现登录页')).toBeNull()
+  })
+
   it('copies the task id to the clipboard from the expanded row', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })

@@ -251,6 +251,10 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
   const [searchTerm, setSearchTerm] = useState('')
   const [tick, setTick] = useState(0)
   const outputRef = useRef<HTMLPreElement | null>(null)
+  // Mirror the load state so async callbacks can tell a refresh apart from a first load.
+  const stateRef = useRef<LoadState>({ kind: 'idle' })
+  // The group whose tasks the current ready state displays; only same-group refreshes keep the list.
+  const loadedGroupRef = useRef<string | null>(null)
 
   // Load the group list once (reused by the dropdown).
   useEffect(() => {
@@ -279,15 +283,33 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
       return
     }
     let alive = true
-    setState({ kind: 'loading' })
+    // 同一群组的自动/手动刷新保留已有列表,避免“加载中…”闪烁;切换群组或首次加载时显示 loading。
+    setState((prev) => (prev.kind === 'ready' && loadedGroupRef.current === groupId ? prev : { kind: 'loading' }))
     fetchTasks(apiBase, groupId).then(
-      (tasks) => { if (alive) setState({ kind: 'ready', tasks }) },
+      (tasks) => {
+        if (alive) {
+          loadedGroupRef.current = groupId
+          setState({ kind: 'ready', tasks })
+        }
+      },
       (error: unknown) => {
-        if (alive) setState({ kind: 'error', message: error instanceof Error ? error.message : String(error) })
+        if (!alive) return
+        const message = error instanceof Error ? error.message : String(error)
+        if (stateRef.current.kind === 'ready' && loadedGroupRef.current === groupId) {
+          // 刷新失败:保留旧列表,不打断用户查看,仅记录告警。
+          console.warn(`[CoAgentHubTaskPanel] 刷新任务失败,保留旧列表:${message}`)
+          return
+        }
+        setState({ kind: 'error', message })
       },
     )
     return () => { alive = false }
   }, [apiBase, groupId, tick])
+
+  // Keep stateRef in sync with the rendered load state.
+  useEffect(() => {
+    stateRef.current = state
+  }, [state])
 
   // Auto-refresh every TASK_REFRESH_MS while a group is selected.
   useEffect(() => {
