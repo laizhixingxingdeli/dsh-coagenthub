@@ -1,6 +1,7 @@
 /**
  * CoAgentHub runtime settings (host half): an in-memory map persisted to
- * `$DSH_HOME/coagenthub-config.json` so address changes survive restarts.
+ * `$DSH_HOME/coagenthub-config.json` (or `~/.dsh/coagenthub-config.json` when
+ * `DSH_HOME` is unset) so address changes survive restarts.
  * Read/write failures never block — memory is the fallback. Shared by the
  * proxy plugin (per-request forward target) and the tools plugin (client),
  * so saving from the panel takes effect without editing cordis.yml.
@@ -8,6 +9,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 /** Mac→Win path mapping rule used to project group paths onto a Windows host. */
@@ -29,14 +31,18 @@ export interface CoAgentHubSettings {
   activeGroupId?: string
 }
 
-/** File name of the persisted settings under `$DSH_HOME`. */
+/** File name of the persisted settings under `$DSH_HOME` (or `~/.dsh`). */
 export const CONFIG_FILE_NAME = 'coagenthub-config.json'
 
-/** Resolve the config file path from `$DSH_HOME`; null when unset (memory only). */
-export function defaultConfigFilePath(): string | null {
+/**
+ * Resolve the config file path: `$DSH_HOME/coagenthub-config.json` when
+ * `DSH_HOME` is set, else fall back to `~/.dsh/coagenthub-config.json`
+ * so settings still persist when dsh web runs without `DSH_HOME`.
+ */
+export function defaultConfigFilePath(): string {
   const home = process.env.DSH_HOME
-  if (home === undefined || home.trim() === '') return null
-  return join(home, CONFIG_FILE_NAME)
+  if (home !== undefined && home.trim() !== '') return join(home, CONFIG_FILE_NAME)
+  return join(homedir(), '.dsh', CONFIG_FILE_NAME)
 }
 
 /** Drop empty strings, unknown keys, and malformed mapping rules so persistence stays clean. */

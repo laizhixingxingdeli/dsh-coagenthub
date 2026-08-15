@@ -48,6 +48,17 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
         participantId: 019ff626-8a19-701f-aa30-a5c05ae58c45
 ```
 
+### 设置持久化路径
+
+面板「设置」里保存的 `apiBase` / `participantId` / `mappingRule` / `activeGroupId` 由 host 半写入磁盘,重启 dsh web 后自动恢复,路径规则:
+
+| 环境变量 | 持久化文件 |
+| --- | --- |
+| `DSH_HOME` 已设置(旧版路径,优先) | `$DSH_HOME/coagenthub-config.json` |
+| `DSH_HOME` 未设置或为空 | `~/.dsh/coagenthub-config.json`(Windows 常见,默认落盘于此) |
+
+写/读失败不阻塞:设置保留在内存继续生效,下次启动再从磁盘尽力恢复(失败则回落内存)。
+
 ### 工具清单
 
 | 工具 | 参数 | 说明 |
