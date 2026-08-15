@@ -149,6 +149,26 @@ describe('createCoAgentHubTools', () => {
     )
   })
 
+  it('dispatch_task throws a clear error when the server rejects with 403', async () => {
+    const postMessage = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'forbidden: not a coordinator' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    await expect(execute(tool, { groupId: 'g1', body: '任务' })).rejects.toThrow(
+      '无权限发布任务：需要 coordinator/human 身份',
+    )
+    expect(postMessage).toHaveBeenCalledTimes(1)
+  })
+
   it('get_messages filters by `after` and sorts newest first', async () => {
     const messages = [
       { id: 'm1', createdAt: '2026-08-14T01:00:00.000Z' },

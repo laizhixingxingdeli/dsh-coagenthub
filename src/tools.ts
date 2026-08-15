@@ -400,15 +400,22 @@ export function createCoAgentHubTools(
           priority: args.priority,
           dependencies: args.dependencies,
         })
-        const message = await client.postMessage(args.groupId, {
-          body: taskBook,
-          audience: 'participant',
-          audienceRef: executor.id,
-        })
-        return {
-          messageId: message.id,
-          executorParticipantId: executor.id,
-          executorName: executor.name,
+        try {
+          const message = await client.postMessage(args.groupId, {
+            body: taskBook,
+            audience: 'participant',
+            audienceRef: executor.id,
+          })
+          return {
+            messageId: message.id,
+            executorParticipantId: executor.id,
+            executorName: executor.name,
+          }
+        } catch (error) {
+          if (error instanceof CoAgentHubError && error.status === 403) {
+            throw new Error('无权限发布任务：需要 coordinator/human 身份')
+          }
+          throw error
         }
       },
     }),
