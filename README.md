@@ -116,18 +116,18 @@ node scripts/build-client.mjs   # 产出 lib/client.js(dsh web 启动时加载)
 | `src/ws-client.ts` | Node 侧 WebSocket 客户端:`<apiBase>/ws?participantId=<id>`,指数退避重连 1s→30s,身份变化自动重连 |
 | `src/task-watcher.ts` | 后台任务状态监测:订阅 `group_message` / `task_output` / `task_stall_alert` / `task_status_changed` 帧 + 对 active group 低频轮询(4s)兜底,检测 queued→running→done/failed 变化 |
 | `src/notification-queue.ts` | 内存通知队列(容量 200):task.completed / task.failed / task.stalled / task.status_changed / message.received |
-| `src/notify.ts` | 通知投递适配层:`PushAdapter` 抽象 + `DshAgentPushAdapter`(dsh `agent.inject` 主动推送进会话)/ `NullPushAdapter`(回退入队 + 日志说明),deliverer 推送失败自动回落队列 |
+| `src/notify.ts` | 通知投递适配层:`PushAdapter` 抽象 + `DshAgentPushAdapter`(dsh `agent.followup` 排队 next-turn 消息并唤醒 driver)/ `NullPushAdapter`(回退入队 + 日志说明),deliverer 推送失败自动回落队列 |
 | `src/proxy.ts` | host 半 HTTP 代理(同源路由 `/coagenthub-api` 转发到 CoAgentHub) |
 | `src/client-ui/*` | 浏览器半面板(群列表/任务/执行器/设置 + 可拖动外壳),不实现 agent 工具 |
 | `COAGENTHUB.md` | 插件工作区常驻指令,`coagenthub_get_workspace_instructions` / `coagenthub_get_active_group` 读取 |
 
-后台事件链路:B 方案 —— `TaskWatcher` 接 WS 帧并做低频轮询兜底 → `notify.ts` 适配层:运行时暴露 `ctx.agents` 注册表时用 `DshAgentPushAdapter` 主动注入 dsh 会话(`agent.inject`,plugin 来源消息),否则回落 `NullPushAdapter` 入队;`coagenthub_get_notifications` 始终可补读,替代轮询查任务状态。
+后台事件链路:B 方案 —— `TaskWatcher` 接 WS 帧并做低频轮询兜底 → `notify.ts` 适配层:运行时暴露 `ctx.agents` 注册表时用 `DshAgentPushAdapter` 主动唤醒 dsh 会话(`agent.followup` 排队 next-turn 消息,plugin 来源),否则回落 `NullPushAdapter` 入队;`coagenthub_get_notifications` 始终可补读,替代轮询查任务状态。
 
-### 主动推送支持状态(dsh 运行时缺失点)
+### 主动推送支持状态(已通过 agent.followup 实现真正唤醒)
 
 调研结论(`@deepseek-ai/dsh-agent` 0.1.0-rc.6 / `@deepseek-ai/dsh-llm` 0.1.0-rc.6 源码):
 
-- **注入能力存在**:dsh 运行时在 `Agent` 上暴露 `inject(UserMessage)`(runtime-types.d.ts),把消息排入下一个 pre-step 的模型上下文而不唤醒 driver,正是"后台任务完成后向 agent 汇报"的语义;`createUserMessage({ content, source: { kind: 'plugin', plugin } })` 可构造合法 UserMessage(自动生成稳定 id,plugin 来源官方支持)。
+- **唤醒能力存在**:dsh 运行时在 `Agent` 上暴露 `followup(UserMessage)`(runtime-types.d.ts),把普通 next-turn 消息排队并唤醒 driver,正是"后台任务完成后向 agent 汇报并唤醒会话"的语义;`createUserMessage({ content, source: { kind: 'plugin', plugin } })` 可构造合法 UserMessage(自动生成稳定 id,plugin 来源官方支持)。
 - **后台上下文无稳定 agent 句柄**:插件 `apply(ctx)` 的根上下文上 `ctx.agent` 为 undefined(仅 agent 作用域上下文中有),因此本插件通过 `ctx.agents`(AgentRegistry)在每次推送时解析 live root agent。
 - **回退行为**:运行时未暴露 `ctx.agents` 时插件记录 warn 日志并回落 `NullPushAdapter`(通知入队),`coagenthub_get_notifications` 补读;推送抛错/拒绝同样回落队列,通知不丢。
 

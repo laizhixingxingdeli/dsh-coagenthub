@@ -2,17 +2,17 @@
  * Notification delivery to the dsh agent (host half).
  *
  * 调研结论(dsh-agent 0.1.0-rc.6 / dsh-llm 0.1.0-rc.6):
- * - dsh 运行时暴露主动注入 API:`Agent.inject(UserMessage)`(dsh-agent
- *   runtime-types.d.ts),把消息排入下一个 pre-step 的模型上下文而不唤醒
- *   driver——正是"后台任务完成后向 agent 汇报"所需的语义。dsh-llm 的
+ * - dsh 运行时暴露主动唤醒 API:`Agent.followup(UserMessage)`(dsh-agent
+ *   runtime-types.d.ts),把一条普通 next-turn 消息排队并唤醒 driver——正是
+ *   "后台任务完成后向 agent 汇报并唤醒会话"所需的语义。dsh-llm 的
  *   `createUserMessage({ content, source })` 可构造合法 UserMessage(自动生成
  *   稳定 id);`source: { kind: 'plugin', plugin }` 是官方 MessageSourceMap 的
  *   plugin 来源,无需伪造会话存储里的 id/source。
  * - 后台插件上下文(`apply` 的根 ctx)上 `ctx.agent` 为 undefined,没有稳定 agent
  *   句柄;但 `ctx.agents`(AgentRegistry)可 `roots()`/`list()` 解析 live agent,
  *   因此推送时现查即可。
- * - 本模块因此提供 `PushAdapter` 抽象:有注入能力时用 `DshAgentPushAdapter`
- *   (`agent.inject` 主动推送),否则保留 `NullPushAdapter` 回退——通知入队,
+ * - 本模块因此提供 `PushAdapter` 抽象:有唤醒能力时用 `DshAgentPushAdapter`
+ *   (`agent.followup` 真正唤醒会话),否则保留 `NullPushAdapter` 回退——通知入队,
  *   由 `coagenthub_get_notifications` 工具补读,并在日志中说明原因。
  * @module @laizhixingxingdeli/dsh-coagenthub/notify
  */
@@ -25,12 +25,12 @@ import type { CoAgentHubNotification, CoAgentHubNotificationType } from './notif
 /** Plugin 来源标记,用于注入消息的 source(MessageSourceMap.plugin)。 */
 export const NOTIFICATION_PLUGIN_NAME = 'coagenthub'
 
-/** Active-push signature: push one notification into the agent's context. */
+/** Active-push signature: push one notification into the agent's next turn. */
 export type NotificationPush = (notification: CoAgentHubNotification) => void
 
 /**
- * 主动推送适配器:把一条通知送进 dsh 会话(注入)或队列(回退)。
- * 实现方应保证:推送失败(无 agent 句柄 / 注入抛错 / 拒绝)时通知不丢,
+ * 主动推送适配器:把一条通知送进 dsh 会话(followup 唤醒)或队列(回退)。
+ * 实现方应保证:推送失败(无 agent 句柄 / followup 抛错 / 拒绝)时通知不丢,
  * 由 deliverer 回落队列。
  */
 export interface PushAdapter {
@@ -76,9 +76,9 @@ export interface DshAgentPushAdapterOptions {
 }
 
 /**
- * 基于 dsh `Agent.inject(UserMessage)` 的主动推送适配器。通知被包装成
- * plugin 来源的用户消息,注入当前 agent 的模型上下文;解析不到 agent 时
- * 抛出,由 deliverer 回退队列。
+ * 基于 dsh `Agent.followup(UserMessage)` 的主动推送适配器。通知被包装成
+ * plugin 来源的用户消息,排队为当前 agent 的 next-turn 消息并唤醒 driver;
+ * 解析不到 agent 时抛出,由 deliverer 回退队列。
  */
 export class DshAgentPushAdapter implements PushAdapter {
   private readonly resolveAgent: () => Agent | undefined
@@ -92,13 +92,13 @@ export class DshAgentPushAdapter implements PushAdapter {
   push(notification: CoAgentHubNotification): void {
     const agent = this.resolveAgent()
     if (agent === undefined) {
-      throw new Error('no live dsh agent to inject into')
+      throw new Error('no live dsh agent to followup')
     }
-    agent.inject(createUserMessage({
+    agent.followup(createUserMessage({
       content: [{ type: 'text', text: formatNotification(notification) }],
       source: { kind: 'plugin', plugin: NOTIFICATION_PLUGIN_NAME },
     }))
-    this.log?.(`[coagenthub] 主动推送 → ${agent.id}: ${formatNotification(notification)}`)
+    this.log?.(`[coagenthub] 主动推送(唤醒) → ${agent.id}: ${formatNotification(notification)}`)
   }
 }
 
@@ -119,7 +119,7 @@ export class NullPushAdapter implements PushAdapter {
   private readonly log?: (message: string) => void
 
   constructor(options: NullPushAdapterOptions = {}) {
-    this.reason = options.reason ?? 'dsh 运行时未接入 agent.inject'
+    this.reason = options.reason ?? 'dsh 运行时未接入 agent.followup'
     this.log = options.log
   }
 

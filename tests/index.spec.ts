@@ -58,7 +58,7 @@ describe('plugin startup', () => {
     await expect(fiber).resolves.toBeDefined()
     await fiber.dispose()
 
-    const info = logs.find(log => log.type === 'info' && String(log.args[0]).includes('支持主动注入'))
+    const info = logs.find(log => log.type === 'info' && String(log.args[0]).includes('支持主动唤醒'))
     expect(info).toBeTruthy()
   })
 })

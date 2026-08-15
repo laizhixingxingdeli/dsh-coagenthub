@@ -39,8 +39,9 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   ctx.effect(() => registerCoAgentHubTools(ctx, client, settingsStore), 'coagenthub.tools()')
 
   // B 方案后台事件链路:WS 订阅 + 低频轮询兜底。通知走主动推送适配器:
-  // dsh 运行时暴露 ctx.agents 注册表时,用 agent.inject 注入当前会话;
-  // 否则回退 NullPushAdapter 入队,由 coagenthub_get_notifications 补读。
+  // dsh 运行时暴露 ctx.agents 注册表时,用 agent.followup 排队 next-turn
+  // 消息并唤醒当前会话;否则回退 NullPushAdapter 入队,由
+  // coagenthub_get_notifications 补读。
   const adapter = buildPushAdapter(ctx)
   const deliverer = createNotificationDeliverer(adapter)
   const ws = new CoAgentHubWsClient({
@@ -65,7 +66,7 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
 }
 
 /**
- * 探测 dsh 运行时注入能力并选择推送适配器。后台插件上下文没有稳定 agent
+ * 探测 dsh 运行时唤醒能力并选择推送适配器。后台插件上下文没有稳定 agent
  * 句柄(`ctx.agent` 仅在 agent 作用域上下文中存在),因此通过 `ctx.agents`
  * 注册表在每次推送时解析 live agent(root)。运行时未暴露注册表时回退
  * NullPushAdapter(入队 + 日志说明原因)。
@@ -84,7 +85,7 @@ function buildPushAdapter(ctx: Context): PushAdapter {
   }
   const registry = probed
   if (registry !== undefined && typeof registry.roots === 'function') {
-    ctx.logger?.('coagenthub').info('dsh 运行时支持主动注入(agent.inject),通知将直接推送进会话')
+    ctx.logger?.('coagenthub').info('dsh 运行时支持主动唤醒(agent.followup),通知将直接推送进会话并唤醒 driver')
     return new DshAgentPushAdapter({
       resolveAgent: () => registry.roots()[0],
       log,
@@ -92,7 +93,7 @@ function buildPushAdapter(ctx: Context): PushAdapter {
   }
   ctx.logger?.('coagenthub').warn('dsh 运行时未暴露 ctx.agents 注册表,主动推送不可用;通知入队由 coagenthub_get_notifications 补读')
   return new NullPushAdapter({
-    reason: 'dsh 运行时未暴露 ctx.agents 注册表(无 agent.inject 注入能力)',
+    reason: 'dsh 运行时未暴露 ctx.agents 注册表(无 agent.followup 唤醒能力)',
     log,
   })
 }

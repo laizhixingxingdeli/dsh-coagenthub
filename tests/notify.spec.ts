@@ -8,16 +8,16 @@ import {
   formatNotification,
 } from '../src/notify.ts'
 
-/** Minimal dsh Agent stub exposing just the inject surface the adapter uses. */
+/** Minimal dsh Agent stub exposing just the followup surface the adapter uses. */
 function agentStub(id = 'agent-1') {
   return {
     id,
-    inject: vi.fn(),
+    followup: vi.fn(),
   }
 }
 
 /** Cast a stub to the dsh Agent type at the adapter boundary. */
-function asAgent(agent: { id: string; inject: ReturnType<typeof vi.fn> }): Agent {
+function asAgent(agent: { id: string; followup: ReturnType<typeof vi.fn> }): Agent {
   return agent as unknown as Agent
 }
 
@@ -44,15 +44,15 @@ afterEach(() => {
 })
 
 describe('DshAgentPushAdapter', () => {
-  it('injects a plugin-sourced user message into the resolved agent', () => {
+  it('queues a plugin-sourced user message via followup on the resolved agent', () => {
     const agent = agentStub('agent-1')
     const adapter = new DshAgentPushAdapter({ resolveAgent: () => asAgent(agent) })
     const notification = makeNotification()
 
     adapter.push(notification)
 
-    expect(agent.inject).toHaveBeenCalledTimes(1)
-    const message = agent.inject.mock.calls[0]![0] as { role: string; content: Array<{ type: string; text: string }>; source: { kind: string; plugin: string } }
+    expect(agent.followup).toHaveBeenCalledTimes(1)
+    const message = agent.followup.mock.calls[0]![0] as { role: string; content: Array<{ type: string; text: string }>; source: { kind: string; plugin: string } }
     expect(message.role).toBe('user')
     expect(message.content[0]).toMatchObject({ type: 'text', text: formatNotification(notification) })
     // 插件来源:无需伪造会话存储里的 id/source。
@@ -61,7 +61,7 @@ describe('DshAgentPushAdapter', () => {
 
   it('throws when no live agent can be resolved', () => {
     const adapter = new DshAgentPushAdapter({ resolveAgent: () => undefined })
-    expect(() => adapter.push(makeNotification())).toThrow('no live dsh agent')
+    expect(() => adapter.push(makeNotification())).toThrow('no live dsh agent to followup')
   })
 })
 
@@ -78,28 +78,38 @@ describe('NullPushAdapter', () => {
 })
 
 describe('createNotificationDeliverer', () => {
-  it('pushes via the adapter when dsh injection is wired, leaving the queue empty', () => {
+  it('pushes via followup when dsh wake-up is wired, leaving the queue empty', () => {
     const agent = agentStub('agent-1')
     const deliverer = createNotificationDeliverer(new DshAgentPushAdapter({ resolveAgent: () => asAgent(agent) }))
 
     deliverer.deliver(makeNotification())
 
-    expect(agent.inject).toHaveBeenCalledTimes(1)
+    expect(agent.followup).toHaveBeenCalledTimes(1)
     expect(notificationQueue.size).toBe(0)
   })
 
-  it('falls back to the queue when there is no dsh injection service (NullPushAdapter)', () => {
-    const deliverer = createNotificationDeliverer(new NullPushAdapter({ reason: 'runtime 不支持注入' }))
+  it('falls back to the queue when no live agent can be resolved', () => {
+    const deliverer = createNotificationDeliverer(new DshAgentPushAdapter({ resolveAgent: () => undefined }))
+
+    deliverer.deliver(makeNotification())
+
+    // 无 live agent 时不丢通知:入队,agent 可用 get_notifications 补读。
+    expect(notificationQueue.size).toBe(1)
+    expect(notificationQueue.drain()[0]).toMatchObject({ taskId: 't1' })
+  })
+
+  it('falls back to the queue when there is no dsh wake-up service (NullPushAdapter)', () => {
+    const deliverer = createNotificationDeliverer(new NullPushAdapter({ reason: 'runtime 不支持 followup' }))
 
     deliverer.deliver(makeNotification())
 
     expect(notificationQueue.size).toBe(1)
   })
 
-  it('falls back to the queue when the active push throws', () => {
+  it('falls back to the queue when followup throws', () => {
     const agent = agentStub('agent-1')
-    agent.inject.mockImplementation(() => {
-      throw new Error('inject failed')
+    agent.followup.mockImplementation(() => {
+      throw new Error('followup failed')
     })
     const deliverer = createNotificationDeliverer(new DshAgentPushAdapter({ resolveAgent: () => asAgent(agent) }))
 
