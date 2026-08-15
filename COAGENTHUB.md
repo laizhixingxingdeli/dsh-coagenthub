@@ -16,6 +16,15 @@
 - 如果当前工作区不是插件工作区或未选择,直接问用户要做什么,不要自行大范围探索;
 - 只读取与当前任务相关的群 / 任务 / 消息,不要遍历无关上下文。
 
+### 本地路径硬规则(禁止猜测路径)
+
+- **禁止猜测本地文件路径**。需要读取或修改本地文件前,先调用工具拿真实路径:
+  - `coagenthub_get_active_group` 返回的 `winPath` / `projectPath`;
+  - 或 `coagenthub_get_workspace_instructions` 里说明的仓库位置。
+- 插件仓库在 Windows 侧通常通过虚拟工作区映射(例如 `Z:\dsh-coagenthub` 或 `Y:\dsh-coagenthub`)访问;本地源也可能在 `C:\projects\dsh-coagenthub`,但必须从工具返回值确认,不要写死。
+- 如果路径不存在,先调用 `coagenthub_list_groups` / `coagenthub_get_active_group` 或直接问用户,不要反复尝试不同盘符 / 用户名。
+- 不要尝试 `C:\Users\Administrator`、`C:\Users\Default` 等猜测的用户目录。
+
 ## 沟通与思考风格
 
 - 用户需求已经明确时,直接行动(派任务 / 查状态 / 给结论),不要重复复述背景;
