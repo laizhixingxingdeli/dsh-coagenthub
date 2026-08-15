@@ -227,3 +227,24 @@ dsh 的工作区是**运行 dsh 的机器本地目录**。Windows 的 dsh 无需
 3. dsh 工作区选择器出现「群名」,选中即锁定该群(面板同步)
 
 前置:Mac 需开启文件共享(SMB),Win 首次需 Mac 共享凭据。
+
+
+## 变更记录
+
+### 0.0.8
+
+- 修复 `ctx.agents` 未注入导致 dsh web 重启阻断:改为安全探测,agents 缺失时回退通知队列
+- 修复 `coagenthub_get_group` / `coagenthub_list_executors` / `coagenthub_list_groups` 输出含 `undefined` 字段的问题
+- 修复 `coagenthub_get_task` 输出 schema 中 `attempts[].error/summary/hash` 缺省补齐为 `null`
+- 修复 `workspace-instructions` 读取路径:优先 `session.header.cwd`,兼容回退 `session.meta.cwd`
+
+### 0.0.7
+
+- 面板标题栏可拖动并持久化位置
+- 新增工具:`coagenthub_list_groups` / `coagenthub_get_group` / `coagenthub_list_executors` / `coagenthub_get_task` / `coagenthub_get_notifications`
+- `coagenthub_dispatch_task` 支持结构化任务书字段
+- 工作区级指令 `COAGENTHUB.md` + `coagenthub_get_workspace_instructions`
+- B 方案后台订阅与主动推送(`ws-client` / `task-watcher` / `notify` / `notification-queue`)
+- 设置持久化:`DSH_HOME` 未设置时回退 `~/.dsh/coagenthub-config.json`
+- 修复任务面板 `task.attempts` 未防御导致崩溃
+- 修复任务面板 15s 自动刷新闪屏
