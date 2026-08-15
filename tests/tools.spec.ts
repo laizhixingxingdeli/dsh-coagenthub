@@ -598,4 +598,97 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('get_active_group resolves the group from cwd via a non-Z mapping rule', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Y:\\' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await tool.execute({}, {
+      agent: { session: { meta: { cwd: 'Y:\\dsh-coagenthub' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({
+      groupId: 'g1',
+      groupTitle: 'dsh-coagenthub 插件开发',
+      projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
+      winPath: 'Y:\\dsh-coagenthub',
+    }))
+  })
+
+  it('get_active_group resolves the group from cwd matching a native Windows path (case/slash tolerant)', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g2', '本地 Windows 项目', 'active', 'C:\\projects\\dsh-coagenthub')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await tool.execute({}, {
+      agent: { session: { meta: { cwd: 'c:/Projects/dsh-coagenthub' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({
+      groupId: 'g2',
+      groupTitle: '本地 Windows 项目',
+      projectPath: 'C:\\projects\\dsh-coagenthub',
+      winPath: 'C:\\projects\\dsh-coagenthub',
+    }))
+  })
+
+  it('get_active_group keeps the native winPath for a selected Windows-local group', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g2' })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g2', '本地 Windows 项目', 'active', 'C:\\projects\\dsh-coagenthub')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await tool.execute({}, {} as never)) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({
+      groupId: 'g2',
+      winPath: 'C:\\projects\\dsh-coagenthub',
+    }))
+  })
+
+  it('get_active_group returns null when cwd matches no group; instructions tool still reads COAGENTHUB.md', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagenthub-nomatch-'))
+    try {
+      writeFileSync(join(dir, 'COAGENTHUB.md'), '非插件群指令')
+      const client = clientWith(() =>
+        Promise.resolve({ items: [group('g1', '别的项目', 'active', '/Users/apple/Desktop/Projects/other')], total: 1 }),
+      )
+      const tools = createCoAgentHubTools(client)
+      const active = tools.find(t => t.name === 'coagenthub_get_active_group')!
+      expect(await active.execute({}, { agent: { session: { meta: { cwd: dir } } } } as never)).toBeNull()
+      const instructions = tools.find(t => t.name === 'coagenthub_get_workspace_instructions')!
+      const result = (await instructions.execute({}, {
+        agent: { session: { meta: { cwd: dir } } },
+      } as never)) as Record<string, unknown>
+      expect(result).toEqual({ groupId: null, groupTitle: null, instructions: '非插件群指令' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('get_workspace_instructions fills groupId/groupTitle from cwd when no group is selected', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Y:\\' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g3', '映射群', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_workspace_instructions')!
+    const result = (await tool.execute({}, {
+      agent: { session: { meta: { cwd: 'Y:\\dsh-coagenthub' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual({ groupId: 'g3', groupTitle: '映射群', instructions: null })
+  })
 })

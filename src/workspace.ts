@@ -117,6 +117,62 @@ export function projectToWinPath(macPath: string, macPrefix: string, winPrefix: 
   return root + relative.replaceAll('/', '\\')
 }
 
+/**
+ * True when the path is a Windows local absolute path: a drive-letter path
+ * (`C:\...` / `C:/...`) or a UNC path (`\\server\share` / `//server/share`).
+ */
+export function isWindowsLocalPath(path: string): boolean {
+  const trimmed = path.trim()
+  return /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\') || trimmed.startsWith('//')
+}
+
+/** Normalize a Windows path for comparison: lowercase, `/` ≡ `\`, trailing separators dropped. */
+export function normalizeWindowsPath(path: string): string {
+  return path.trim().toLowerCase().replaceAll('/', '\\').replace(/\\+$/, '')
+}
+
+/** Windows path equality: case-insensitive, `/` ≡ `\`, trailing separators ignored. */
+export function sameWindowsPath(left: string, right: string): boolean {
+  return normalizeWindowsPath(left) === normalizeWindowsPath(right)
+}
+
+/**
+ * Compute the Windows-side path of a group's projectPath: null when the
+ * projectPath is unset; the mapping-rule result when the rule maps it; the
+ * projectPath itself when it is already a Windows local absolute path; null
+ * otherwise. Never invents a drive letter.
+ */
+export function groupProjectWinPath(
+  projectPath: string | null | undefined,
+  mappingRule: PathMappingRule | undefined,
+): string | null {
+  if (projectPath === null || projectPath === undefined || projectPath.trim() === '') return null
+  if (mappingRule !== undefined) {
+    const mapped = projectToWinPath(projectPath, mappingRule.macPrefix, mappingRule.winPrefix)
+    if (mapped !== null) return mapped
+  }
+  return isWindowsLocalPath(projectPath) ? projectPath : null
+}
+
+/**
+ * Find the first group whose projectPath — mapped through the rule when
+ * possible, else its own Windows local absolute path — matches the session
+ * cwd as a Windows path. Groups without a usable projectPath are skipped;
+ * null when nothing matches.
+ */
+export function findGroupByWorkspaceCwd(
+  groups: readonly GroupWithPath[],
+  cwd: string | null | undefined,
+  mappingRule: PathMappingRule | undefined,
+): GroupWithPath | null {
+  if (cwd === null || cwd === undefined || cwd.trim() === '') return null
+  for (const group of groups) {
+    const winPath = groupProjectWinPath(group.projectPath, mappingRule)
+    if (winPath !== null && sameWindowsPath(winPath, cwd)) return group
+  }
+  return null
+}
+
 /** Build the mapping rule for a drive letter; null when no common prefix. */
 export function buildMappingRule(
   projectPaths: readonly string[],

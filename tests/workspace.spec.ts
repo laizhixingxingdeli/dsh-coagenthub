@@ -5,9 +5,13 @@ import {
   buildNetUseArgs,
   buildWorkspaceStatus,
   extractApiHost,
+  findGroupByWorkspaceCwd,
+  groupProjectWinPath,
   inferMacPrefix,
+  isWindowsLocalPath,
   projectToWinPath,
   runWorkspaceSetup,
+  sameWindowsPath,
   WorkspaceSetupError,
   type GroupWithPath,
   type PathExists,
@@ -249,5 +253,43 @@ describe('buildWorkspaceStatus', () => {
       expect.objectContaining({ groupId: 'g1', winPath: null, pathExists: false, registered: null }),
       expect.objectContaining({ groupId: 'g2', winPath: null, pathExists: false, registered: null }),
     ])
+  })
+})
+
+describe('workspace cwd lookup pure functions', () => {
+  it('sameWindowsPath ignores case, slash direction and trailing separators', () => {
+    expect(sameWindowsPath('C:\\Projects\\dsh-coagenthub', 'c:/projects/dsh-coagenthub')).toBe(true)
+    expect(sameWindowsPath('Y:\\dsh-coagenthub\\', 'y:\\dsh-coagenthub')).toBe(true)
+    expect(sameWindowsPath('//server/share/a', '\\\\server\\share\\a')).toBe(true)
+    expect(sameWindowsPath('C:\\a', 'C:\\b')).toBe(false)
+  })
+
+  it('isWindowsLocalPath recognizes drive-letter and UNC absolute paths only', () => {
+    expect(isWindowsLocalPath('C:\\projects\\x')).toBe(true)
+    expect(isWindowsLocalPath('c:/projects/x')).toBe(true)
+    expect(isWindowsLocalPath('\\\\server\\share')).toBe(true)
+    expect(isWindowsLocalPath('/Users/apple/x')).toBe(false)
+    expect(isWindowsLocalPath('projects\\x')).toBe(false)
+    expect(isWindowsLocalPath('')).toBe(false)
+  })
+
+  it('groupProjectWinPath maps via the rule, keeps native Windows paths, else null', () => {
+    const rule = { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Y:\\' }
+    expect(groupProjectWinPath('/Users/apple/Desktop/Projects/dsh-coagenthub', rule)).toBe('Y:\\dsh-coagenthub')
+    expect(groupProjectWinPath('C:\\projects\\dsh-coagenthub', undefined)).toBe('C:\\projects\\dsh-coagenthub')
+    expect(groupProjectWinPath('/Users/apple/Desktop/Projects/dsh-coagenthub', undefined)).toBeNull()
+    expect(groupProjectWinPath(null, rule)).toBeNull()
+  })
+
+  it('findGroupByWorkspaceCwd matches mapped winPath or native Windows path against cwd', () => {
+    const rule = { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Y:\\' }
+    const groups: GroupWithPath[] = [
+      { id: 'g1', title: 'mapped', projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub' },
+      { id: 'g2', title: 'native', projectPath: 'C:\\projects\\other' },
+    ]
+    expect(findGroupByWorkspaceCwd(groups, 'Y:\\dsh-coagenthub', rule)?.id).toBe('g1')
+    expect(findGroupByWorkspaceCwd(groups, 'c:/Projects/OTHER', undefined)?.id).toBe('g2')
+    expect(findGroupByWorkspaceCwd(groups, 'D:\\nowhere', undefined)).toBeNull()
+    expect(findGroupByWorkspaceCwd(groups, null, rule)).toBeNull()
   })
 })

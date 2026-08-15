@@ -13,7 +13,7 @@ import type { Message, Participant } from './client.ts'
 import type { CoAgentHubSettingsStore } from './config.ts'
 import { notificationQueue } from './notification-queue.ts'
 import { buildTaskBook } from './task-book.ts'
-import { projectToWinPath } from './workspace.ts'
+import { findGroupByWorkspaceCwd, groupProjectWinPath } from './workspace.ts'
 import { readWorkspaceInstructions, workspaceRootFromExec } from './workspace-instructions.ts'
 
 const DEFAULT_EXECUTOR_NAME = 'AtomCode'
@@ -491,16 +491,16 @@ export function createCoAgentHubTools(
         render: renderValue,
       },
       async execute(_args: Record<string, never>, exec: ToolRunContext) {
-        const activeGroupId = settingsStore?.get().activeGroupId
-        if (activeGroupId === undefined || activeGroupId.trim() === '') return null
+        const settings = settingsStore?.get()
+        const activeGroupId = settings?.activeGroupId
+        const cwd = workspaceRootFromExec(exec)
         const groups = await client.listGroups(100)
-        const group = groups.items.find(candidate => candidate.id === activeGroupId)
+        const group = activeGroupId !== undefined && activeGroupId.trim() !== ''
+          ? groups.items.find(candidate => candidate.id === activeGroupId)
+          : findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule) ?? undefined
         if (group === undefined) return null
-        const mappingRule = settingsStore?.get().mappingRule
-        const winPath = group.projectPath != null && mappingRule !== undefined
-          ? projectToWinPath(group.projectPath, mappingRule.macPrefix, mappingRule.winPrefix)
-          : null
-        const instructions = await readWorkspaceInstructions(workspaceRootFromExec(exec))
+        const winPath = groupProjectWinPath(group.projectPath, settings?.mappingRule)
+        const instructions = await readWorkspaceInstructions(cwd)
         return {
           groupId: group.id,
           groupTitle: group.title,
@@ -529,18 +529,20 @@ export function createCoAgentHubTools(
         render: renderValue,
       },
       async execute(_args: Record<string, never>, exec: ToolRunContext) {
-        const activeGroupId = settingsStore?.get().activeGroupId
+        const settings = settingsStore?.get()
+        const activeGroupId = settings?.activeGroupId
+        const cwd = workspaceRootFromExec(exec)
         let groupId: string | null = null
         let groupTitle: string | null = null
-        if (activeGroupId !== undefined && activeGroupId.trim() !== '') {
-          const groups = await client.listGroups(100)
-          const group = groups.items.find(candidate => candidate.id === activeGroupId)
-          if (group !== undefined) {
-            groupId = group.id
-            groupTitle = group.title
-          }
+        const groups = await client.listGroups(100)
+        const group = activeGroupId !== undefined && activeGroupId.trim() !== ''
+          ? groups.items.find(candidate => candidate.id === activeGroupId)
+          : findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule) ?? undefined
+        if (group !== undefined) {
+          groupId = group.id
+          groupTitle = group.title
         }
-        const instructions = await readWorkspaceInstructions(workspaceRootFromExec(exec))
+        const instructions = await readWorkspaceInstructions(cwd)
         return { groupId, groupTitle, instructions }
       },
     }),
