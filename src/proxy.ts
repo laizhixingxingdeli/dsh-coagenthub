@@ -265,7 +265,7 @@ export function apply(
   })
   ctx.effect(() => {
     let dispose: (() => void) | undefined
-    void ctx.inject(['webServer'], (webCtx) => {
+    void ctx.inject(['webServer', 'workspaceRegistry'], (webCtx) => {
       console.log('[coagenthub-proxy] webServer available, registering proxy', PROXY_PATH)
       // Workspace endpoints resolve the dsh registry lazily per request, so a
       // profile without the workspaceRegistry service still gets the proxy and
