@@ -8,7 +8,7 @@ DeepSeek Harness(`dsh`)插件:把 CoAgentHub(局域网多参与者协作中枢)�
 - **二期:浏览器半**——群列表面板挂到 dsh 三栏 slot(未实现)
 - **三期:任务面板**——面板升级为「群列表 | 任务」双 Tab:群列表沿用二期;任务 Tab 选群后展示该群任务全貌(状态徽章/执行器/摘要/attempt 时间线/输出 tail,支持复制任务 id、15s 自动刷新 running 任务)
 - **四期:执行器 Tab**——面板升级为「群列表 | 任务 | 执行器」三 Tab:执行器 Tab 列出全部执行器(key/agentName/bin/args/内置徽章/model),非内置可删除(confirm 后 DELETE)、复制 key;折叠式新增表单(POST key/kind/agentName/bin/args/model,kind 默认 cli),内置行不提供删除
-- **五期:指挥官指挥台**——Windows 侧 agent 成为「分析/拆任务/验收」指挥官:新增 5 个工具(`coagenthub_list_groups` / `coagenthub_get_group` / `coagenthub_list_executors` / `coagenthub_get_task` / `coagenthub_get_notifications`)、`coagenthub_dispatch_task` 支持结构化任务书字段、工作区级指令 `COAGENTHUB.md`、后台 WS 订阅 + 任务状态通知;面板标题栏可拖动并记忆位置
+- **五期:指挥官指挥台**——Windows 侧 agent 成为「分析/拆任务/验收」指挥官:新增 5 个工具(`coagenthub_list_groups` / `coagenthub_get_group` / `coagenthub_list_executors` / `coagenthub_get_task` / `coagenthub_get_notifications`)、`coagenthub_dispatch_task` 支持结构化任务书字段、工作区级指令 `COAGENTHUB.md`、后台 WS 订阅 + 任务状态通知(主动推送进 dsh 会话,不可用时回落队列拉取);面板标题栏可拖动并记忆位置
 
 ## 安装
 
@@ -64,7 +64,7 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
 | `coagenthub_get_messages` | `groupId`、`after?` | 消息列表(增量,按创建时间倒序) |
 | `coagenthub_get_active_group` | — | 当前虚拟工作区 `{ groupId, groupTitle, projectPath?, winPath?, instructions? }`;未选择返回 null |
 | `coagenthub_get_workspace_instructions` | — | 读取当前工作区根目录 `COAGENTHUB.md` 指令 `{ groupId, groupTitle, instructions }`;非插件工作区返回 `instructions: null` |
-| `coagenthub_get_notifications` | — | 返回并清空后台事件通知(task.completed/failed/stalled/status_changed、message.received),供补读 |
+| `coagenthub_get_notifications` | — | 返回并清空后台事件通知(task.completed/failed/stalled/status_changed、message.received),供补读;主动推送不可用时自动成为回退通道 |
 
 典型闭环:建群 → 发任务 → 查状态:
 
@@ -104,12 +104,20 @@ node scripts/build-client.mjs   # 产出 lib/client.js(dsh web 启动时加载)
 | `src/ws-client.ts` | Node 侧 WebSocket 客户端:`<apiBase>/ws?participantId=<id>`,指数退避重连 1s→30s,身份变化自动重连 |
 | `src/task-watcher.ts` | 后台任务状态监测:订阅 `group_message` / `task_output` / `task_stall_alert` / `task_status_changed` 帧 + 对 active group 低频轮询(4s)兜底,检测 queued→running→done/failed 变化 |
 | `src/notification-queue.ts` | 内存通知队列(容量 200):task.completed / task.failed / task.stalled / task.status_changed / message.received |
-| `src/notify.ts` | 通知投递:默认入队供 `coagenthub_get_notifications` 拉取;预留主动推送接口(push) |
+| `src/notify.ts` | 通知投递适配层:`PushAdapter` 抽象 + `DshAgentPushAdapter`(dsh `agent.inject` 主动推送进会话)/ `NullPushAdapter`(回退入队 + 日志说明),deliverer 推送失败自动回落队列 |
 | `src/proxy.ts` | host 半 HTTP 代理(同源路由 `/coagenthub-api` 转发到 CoAgentHub) |
 | `src/client-ui/*` | 浏览器半面板(群列表/任务/执行器/设置 + 可拖动外壳),不实现 agent 工具 |
 | `COAGENTHUB.md` | 插件工作区常驻指令,`coagenthub_get_workspace_instructions` / `coagenthub_get_active_group` 读取 |
 
-后台事件链路:B 方案 —— `TaskWatcher` 接 WS 帧并做低频轮询兜底 → `notificationDeliverer` 入队(可扩展主动推送)→ agent 用 `coagenthub_get_notifications` 补读,替代轮询查任务状态。
+后台事件链路:B 方案 —— `TaskWatcher` 接 WS 帧并做低频轮询兜底 → `notify.ts` 适配层:运行时暴露 `ctx.agents` 注册表时用 `DshAgentPushAdapter` 主动注入 dsh 会话(`agent.inject`,plugin 来源消息),否则回落 `NullPushAdapter` 入队;`coagenthub_get_notifications` 始终可补读,替代轮询查任务状态。
+
+### 主动推送支持状态(dsh 运行时缺失点)
+
+调研结论(`@deepseek-ai/dsh-agent` 0.1.0-rc.6 / `@deepseek-ai/dsh-llm` 0.1.0-rc.6 源码):
+
+- **注入能力存在**:dsh 运行时在 `Agent` 上暴露 `inject(UserMessage)`(runtime-types.d.ts),把消息排入下一个 pre-step 的模型上下文而不唤醒 driver,正是"后台任务完成后向 agent 汇报"的语义;`createUserMessage({ content, source: { kind: 'plugin', plugin } })` 可构造合法 UserMessage(自动生成稳定 id,plugin 来源官方支持)。
+- **后台上下文无稳定 agent 句柄**:插件 `apply(ctx)` 的根上下文上 `ctx.agent` 为 undefined(仅 agent 作用域上下文中有),因此本插件通过 `ctx.agents`(AgentRegistry)在每次推送时解析 live root agent。
+- **回退行为**:运行时未暴露 `ctx.agents` 时插件记录 warn 日志并回落 `NullPushAdapter`(通知入队),`coagenthub_get_notifications` 补读;推送抛错/拒绝同样回落队列,通知不丢。
 
 ## 测试
 

@@ -6,9 +6,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CoAgentHubClient } from './client.ts'
 import { getCoAgentHubSettingsStore } from './config.ts'
-import { notificationDeliverer } from './notify.ts'
+import { DshAgentPushAdapter, NullPushAdapter, createNotificationDeliverer, type PushAdapter } from './notify.ts'
 import { TaskWatcher } from './task-watcher.ts'
 import { registerCoAgentHubTools } from './tools.ts'
 import { CoAgentHubWsClient } from './ws-client.ts'
@@ -37,8 +38,11 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   })
   ctx.effect(() => registerCoAgentHubTools(ctx, client, settingsStore), 'coagenthub.tools()')
 
-  // B 方案后台事件链路:WS 订阅 + 低频轮询兜底,通知进队列(可被
-  // coagenthub_get_notifications 拉取;预留推送接口在 notify.ts)。
+  // B 方案后台事件链路:WS 订阅 + 低频轮询兜底。通知走主动推送适配器:
+  // dsh 运行时暴露 ctx.agents 注册表时,用 agent.inject 注入当前会话;
+  // 否则回退 NullPushAdapter 入队,由 coagenthub_get_notifications 补读。
+  const adapter = buildPushAdapter(ctx)
+  const deliverer = createNotificationDeliverer(adapter)
   const ws = new CoAgentHubWsClient({
     baseURL: client.baseURL,
     // 每次(重)连时重新解析 apiBase,设置面板改地址后即时生效。
@@ -48,7 +52,7 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   const watcher = new TaskWatcher({
     client,
     ws,
-    deliver: notificationDeliverer,
+    deliver: deliverer,
     getActiveGroupId: () => settingsStore.get().activeGroupId,
   })
   ctx.effect(
@@ -58,4 +62,27 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     },
     'coagenthub.task-watcher()',
   )
+}
+
+/**
+ * 探测 dsh 运行时注入能力并选择推送适配器。后台插件上下文没有稳定 agent
+ * 句柄(`ctx.agent` 仅在 agent 作用域上下文中存在),因此通过 `ctx.agents`
+ * 注册表在每次推送时解析 live agent(root)。运行时未暴露注册表时回退
+ * NullPushAdapter(入队 + 日志说明原因)。
+ */
+function buildPushAdapter(ctx: Context): PushAdapter {
+  const log = (message: string) => ctx.logger?.('coagenthub').info(message)
+  const registry = (ctx as Context & { agents?: { roots(): Agent[] } }).agents
+  if (registry !== undefined && typeof registry.roots === 'function') {
+    ctx.logger?.('coagenthub').info('dsh 运行时支持主动注入(agent.inject),通知将直接推送进会话')
+    return new DshAgentPushAdapter({
+      resolveAgent: () => registry.roots()[0],
+      log,
+    })
+  }
+  ctx.logger?.('coagenthub').warn('dsh 运行时未暴露 ctx.agents 注册表,主动推送不可用;通知入队由 coagenthub_get_notifications 补读')
+  return new NullPushAdapter({
+    reason: 'dsh 运行时未暴露 ctx.agents 注册表(无 agent.inject 注入能力)',
+    log,
+  })
 }
