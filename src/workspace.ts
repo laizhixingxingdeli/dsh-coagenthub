@@ -243,6 +243,14 @@ export async function runWorkspaceSetup(
   const ip = extractApiHost(deps.getApiBase())
   if (ip === null) throw new WorkspaceSetupError(400, '未配置有效的 CoAgentHub 地址(apiBase)')
 
+  // 先释放盘符(幂等):已存在的映射(即使指向同一共享)会让 net use 报 85
+  // "The local device name is already in use";删除失败(盘符未映射)可忽略。
+  try {
+    await deps.runNetUse(['use', `${driveLetter}:`, '/delete', '/y'])
+  } catch {
+    // 未映射时 net use /delete 报错,忽略
+  }
+
   const args = buildNetUseArgs(ip, shareName, driveLetter, { user: input.macUser, password: input.macPassword })
   try {
     await deps.runNetUse(args)
