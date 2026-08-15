@@ -22,6 +22,7 @@ const EXPECTED_TOOL_NAMES = [
   'coagenthub_get_group',
   'coagenthub_list_executors',
   'coagenthub_get_task',
+  'coagenthub_update_task',
   'coagenthub_get_notifications',
 ] as const
 
@@ -402,6 +403,64 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     const result = (await execute(tool, { groupId: 'g1', taskId: 't1' })) as Record<string, unknown>
     expect(result.diffSummary).toEqual({ summary: '完成', hash: 'abc1234', error: null })
     expect(result.outputTail).toBe('tail')
+  })
+
+  it('update_task updates the brief and returns the updated task summary', async () => {
+    const task = {
+      id: 't1',
+      groupId: 'g1',
+      status: 'queued',
+      executorParticipantId: 'e-atom',
+      brief: '新任务书',
+      createdAt: '2026-08-14T00:00:00.000Z',
+      updatedAt: '2026-08-14T01:00:00.000Z',
+    }
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).includes('/tasks/t1')) return Promise.resolve(task)
+      return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_update_task')!
+    const result = (await execute(tool, { groupId: 'g1', taskId: 't1', brief: '新任务书' })) as Record<string, unknown>
+    expect(result).toEqual({
+      id: 't1',
+      groupId: 'g1',
+      status: 'queued',
+      executorParticipantId: 'e-atom',
+      executorName: 'AtomCode 执行器',
+      brief: '新任务书',
+      createdAt: '2026-08-14T00:00:00.000Z',
+      updatedAt: '2026-08-14T01:00:00.000Z',
+    })
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g1/tasks/t1')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ brief: '新任务书' })
+  })
+
+  it('update_task surfaces the server 409 message verbatim', async () => {
+    const client = clientWith(() =>
+      Promise.resolve(new Response('仅排队中的任务可修改任务书', { status: 409 })),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_update_task')!
+    await expect(execute(tool, { groupId: 'g1', taskId: 't1', brief: 'x' })).rejects.toThrow(
+      '仅排队中的任务可修改任务书',
+    )
+  })
+
+  it('update_task extracts the 409 message from a JSON error envelope', async () => {
+    const client = clientWith(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: '仅排队中的任务可修改任务书' }), { status: 409 })),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_update_task')!
+    await expect(execute(tool, { groupId: 'g1', taskId: 't1', brief: 'x' })).rejects.toThrow(
+      '仅排队中的任务可修改任务书',
+    )
+  })
+
+  it('update_task reports missing permission on 403', async () => {
+    const client = clientWith(() => Promise.resolve(new Response('forbidden', { status: 403 })))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_update_task')!
+    await expect(execute(tool, { groupId: 'g1', taskId: 't1', brief: 'x' })).rejects.toThrow(/无权限修改任务书/)
   })
 
   it('get_notifications returns and clears the pending queue', async () => {

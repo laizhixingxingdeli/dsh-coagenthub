@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { CoAgentHubClient } from './client.ts'
+import { CoAgentHubClient, CoAgentHubError } from './client.ts'
 import type { Message, Participant } from './client.ts'
 import type { CoAgentHubSettingsStore } from './config.ts'
 import { notificationQueue } from './notification-queue.ts'
@@ -65,6 +65,22 @@ function summarizeBrief(brief: string): string {
   const trimmed = brief.trim()
   if (trimmed.length <= BRIEF_SUMMARY_LIMIT) return trimmed
   return `${trimmed.slice(0, BRIEF_SUMMARY_LIMIT)}…`
+}
+
+/** Extract a readable message from an error response body (JSON envelope or raw text). */
+function serverErrorMessage(error: CoAgentHubError): string {
+  const body = error.bodySummary.trim()
+  if (body === '') return ''
+  if (body.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(body) as Record<string, unknown>
+      const message = parsed.error ?? parsed.message
+      if (typeof message === 'string' && message.trim() !== '') return message
+    } catch {
+      // fall through to the raw text
+    }
+  }
+  return body
 }
 
 function requireGroupId(groupId: string | undefined): string {
@@ -234,6 +250,21 @@ const TASK_DETAIL_VIEW_SCHEMA = {
   },
 } as const
 
+const TASK_UPDATE_VIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    groupId: { type: 'string', required: true },
+    status: { type: 'string', required: true },
+    executorParticipantId: { type: 'string', required: true },
+    executorName: { type: 'string', required: true },
+    brief: { type: 'string', required: true },
+    createdAt: { type: 'string', required: true },
+    updatedAt: { type: 'string', required: true },
+  },
+} as const
+
 const NOTIFICATION_VIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -252,7 +283,7 @@ const NOTIFICATION_VIEW_SCHEMA = {
   },
 } as const
 
-/** Build the seven CoAgentHub tool definitions against one client. */
+/** Build the eight CoAgentHub tool definitions against one client. */
 export function createCoAgentHubTools(
   client: CoAgentHubClient,
   settingsStore?: CoAgentHubSettingsStore,
@@ -625,6 +656,49 @@ export function createCoAgentHubTools(
     }),
 
     defineTool({
+      name: 'coagenthub_update_task',
+      description:
+        'Update a CoAgentHub task brief before the task starts executing (PATCH). The server rejects with 409 when the task is no longer in a modifiable (queued) state and with 403 when the caller lacks permission.',
+      parameters: {
+        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        taskId: { type: 'string', required: true, description: 'Task id.' },
+        brief: { type: 'string', required: true, description: 'The new full task brief, replacing the previous one.' },
+      },
+      output: { schema: TASK_UPDATE_VIEW_SCHEMA, render: renderValue },
+      async execute(args: { groupId: string; taskId: string; brief: string }) {
+        try {
+          const [task, participants] = await Promise.all([
+            client.updateTaskBrief(args.groupId, args.taskId, args.brief),
+            client.listParticipants(),
+          ])
+          const nameById = new Map(participants.map(participant => [participant.id, participant.name]))
+          return {
+            id: task.id,
+            groupId: task.groupId,
+            status: task.status,
+            executorParticipantId: task.executorParticipantId,
+            executorName: nameById.get(task.executorParticipantId) ?? task.executorParticipantId,
+            brief: task.brief,
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+          }
+        } catch (error) {
+          if (error instanceof CoAgentHubError) {
+            if (error.status === 409) {
+              const reason = serverErrorMessage(error)
+              throw new Error(reason === '' ? '任务书更新被拒绝(409):任务不在可修改状态' : reason)
+            }
+            if (error.status === 403) {
+              const reason = serverErrorMessage(error)
+              throw new Error(reason === '' ? '无权限修改任务书(403):需要协调者权限' : `无权限修改任务书(403): ${reason}`)
+            }
+          }
+          throw error
+        }
+      },
+    }),
+
+    defineTool({
       name: 'coagenthub_get_notifications',
       description:
         'Return and clear the pending CoAgentHub notifications (task completed / failed / stalled / status changed / new message). Use to catch up on background events instead of polling.',
@@ -637,7 +711,7 @@ export function createCoAgentHubTools(
   ]
 }
 
-/** Register the seven CoAgentHub tools on a dsh tools runtime. */
+/** Register the eight CoAgentHub tools on a dsh tools runtime. */
 export function registerCoAgentHubTools(
   ctx: Context,
   client: CoAgentHubClient,

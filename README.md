@@ -72,6 +72,7 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
 | `coagenthub_dispatch_task` | `groupId`、`body`、`executorName?`(默认 AtomCode)、`goal?/scope?/acceptance?/tests?/report?/priority?/dependencies?` | 找名字含 executorName 的参与者,发定向消息触发任务;结构化字段渲染成 Markdown 任务书(只传 body 时原样发送);返回消息 id |
 | `coagenthub_list_tasks` | `groupId` | 任务列表(id/status/executor/summary/时间) |
 | `coagenthub_get_task` | `groupId`、`taskId` | 单个任务(id/status/executorName/brief/retryCount/attempts/diffSummary/outputTail) |
+| `coagenthub_update_task` | `groupId`、`taskId`、`brief` | 修改任务书(仅排队中的任务可改;返回更新后的任务摘要;409/403 时错误信息透出) |
 | `coagenthub_get_messages` | `groupId`、`after?` | 消息列表(增量,按创建时间倒序) |
 | `coagenthub_get_active_group` | — | 当前虚拟工作区 `{ groupId, groupTitle, projectPath?, winPath?, instructions? }`;未选择返回 null |
 | `coagenthub_get_workspace_instructions` | — | 读取当前工作区根目录 `COAGENTHUB.md` 指令 `{ groupId, groupTitle, instructions }`;非插件工作区返回 `instructions: null` |

@@ -168,4 +168,26 @@ describe('CoAgentHubClient', () => {
     await client.listTasks('g1', true)
     expect(fetchMock.mock.calls[1]![0]).toBe(`${DEFAULT_API_BASE}/groups/g1/tasks?includeOutput=1`)
   })
+
+  it('updateTaskBrief PATCHes the brief to the single-task endpoint', async () => {
+    const task = {
+      id: 't1',
+      groupId: 'g1',
+      brief: '新任务书',
+      status: 'queued',
+      createdAt: '',
+      updatedAt: '2026-08-14T01:00:00.000Z',
+    }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    const result = await client.updateTaskBrief('g1', 't1', '新任务书')
+
+    expect(result).toEqual(task)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${DEFAULT_API_BASE}/groups/g1/tasks/t1`)
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ brief: '新任务书' })
+  })
 })

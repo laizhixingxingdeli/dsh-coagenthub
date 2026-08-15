@@ -271,6 +271,18 @@ export class CoAgentHubClient {
     }
   }
 
+  /**
+   * Update a task's brief (PATCH /groups/:id/tasks/:taskId, body `{ brief }`).
+   * The server rejects with 409 when the task is not in a modifiable (queued)
+   * state and with 403 when the caller lacks permission.
+   */
+  updateTaskBrief(groupId: string, taskId: string, brief: string): Promise<Task> {
+    return this.request<Task>(
+      `/groups/${encodeURIComponent(groupId)}/tasks/${encodeURIComponent(taskId)}`,
+      { method: 'PATCH', body: JSON.stringify({ brief }) },
+    )
+  }
+
   async getParticipantByName(name: string): Promise<Participant | undefined> {
     const participants = await this.listParticipants()
     return participants.find(participant => participant.name === name)
