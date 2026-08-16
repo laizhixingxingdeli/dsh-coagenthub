@@ -21,6 +21,9 @@ const EXPECTED_TOOL_NAMES = [
   'coagenthub_list_groups',
   'coagenthub_get_group',
   'coagenthub_get_group_members',
+  'coagenthub_update_group',
+  'coagenthub_add_group_member',
+  'coagenthub_remove_group_member',
   'coagenthub_list_executors',
   'coagenthub_get_task',
   'coagenthub_update_task',
@@ -521,6 +524,130 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     const client = clientWith(() => Promise.reject(new TypeError('fetch failed')))
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group_members')!
     await expect(execute(tool, { groupId: 'g1' })).rejects.toThrow('无法连接 CoAgentHub 服务')
+  })
+
+  it('update_group PATCHes a new title and returns id/title/status/projectPath', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ...group('g1', '改名后的群'),
+      updatedAt: '',
+      projectPath: '/mac/path',
+    })
+    const client = clientWith(fetchImpl)
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_update_group')!
+    const result = (await execute(tool, { groupId: 'g1', title: '改名后的群' })) as Record<string, unknown>
+
+    expect(result).toEqual({ id: 'g1', title: '改名后的群', status: 'active', projectPath: '/mac/path' })
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g1')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ title: '改名后的群' })
+  })
+
+  it('update_group clears the project binding when projectPath is an empty string', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ...group('g1', 'T'), projectPath: null })
+    const client = clientWith(fetchImpl)
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_update_group')!
+    const result = (await execute(tool, { groupId: 'g1', projectPath: '' })) as { projectPath: string | null }
+
+    expect(result.projectPath).toBeNull()
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ projectPath: null })
+  })
+
+  it('update_group rejects when neither title nor projectPath is provided', async () => {
+    const client = clientWith(() => Promise.resolve(group('g1', 'T')))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_update_group')!
+    await expect(execute(tool, { groupId: 'g1' })).rejects.toThrow('至少传一个')
+  })
+
+  it('update_group surfaces a clear error when the group does not exist (404)', async () => {
+    const client = clientWith(() => Promise.resolve(new Response('{"error":"group not found"}', { status: 404 })))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_update_group')!
+    await expect(execute(tool, { groupId: 'missing', title: 'X' })).rejects.toThrow('群组不存在(404)')
+  })
+
+  it('add_group_member POSTs the member and returns the normalized member row', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      participantId: 'e1',
+      name: 'AtomCode 执行器',
+      device: 'mac',
+      roles: ['executor'],
+      prompt: '执行任务',
+      joinedAt: '2026-08-15T06:00:00.000Z',
+    })
+    const client = clientWith(fetchImpl)
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_add_group_member')!
+    const result = (await execute(tool, { groupId: 'g1', participantId: 'e1' })) as Record<string, unknown>
+
+    expect(result).toEqual({
+      participantId: 'e1',
+      name: 'AtomCode 执行器',
+      device: 'mac',
+      roles: ['executor'],
+      prompt: '执行任务',
+      joinedAt: '2026-08-15T06:00:00.000Z',
+    })
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g1/members')
+    expect(init.method).toBe('POST')
+    // 未传 roles 时默认 ['executor']。
+    expect(JSON.parse(String(init.body))).toEqual({ participantId: 'e1', roles: ['executor'] })
+    expect(JSON.stringify(result).includes('undefined')).toBe(false)
+  })
+
+  it('add_group_member normalizes missing fields and wraps string roles', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({ participantId: 'e1', name: 'N1', roles: 'executor' }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_add_group_member')!
+    const result = (await execute(tool, { groupId: 'g1', participantId: 'e1', roles: ['executor'] })) as Record<string, unknown>
+
+    expect(result).toEqual({
+      participantId: 'e1',
+      name: 'N1',
+      device: null,
+      roles: ['executor'],
+      prompt: null,
+      joinedAt: null,
+    })
+    expect(JSON.stringify(result).includes('undefined')).toBe(false)
+  })
+
+  it('add_group_member rejects a missing participantId', async () => {
+    const client = clientWith(() => Promise.resolve({}))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_add_group_member')!
+    // schema 层必填校验:缺 participantId 时报清晰错误而非崩溃。
+    await expect(execute(tool, { groupId: 'g1' })).rejects.toThrow('missing required property "participantId"')
+  })
+
+  it('add_group_member surfaces a clear error when the group does not exist (404)', async () => {
+    const client = clientWith(() => Promise.resolve(new Response('{"error":"group not found"}', { status: 404 })))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_add_group_member')!
+    await expect(execute(tool, { groupId: 'missing', participantId: 'e1' })).rejects.toThrow('群组或成员不存在(404)')
+  })
+
+  it('remove_group_member returns { ok: true } on success', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    const client = clientWith(fetchImpl)
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_remove_group_member')!
+    const result = await execute(tool, { groupId: 'g1', participantId: 'e1' })
+
+    expect(result).toEqual({ ok: true })
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g1/members/e1')
+    expect(init.method).toBe('DELETE')
+  })
+
+  it('remove_group_member surfaces a clear error when the member/group does not exist (404)', async () => {
+    const client = clientWith(() => Promise.resolve(new Response('{"error":"member not found"}', { status: 404 })))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_remove_group_member')!
+    await expect(execute(tool, { groupId: 'g1', participantId: 'ghost' })).rejects.toThrow('成员或群组不存在(404)')
+  })
+
+  it('remove_group_member rejects a missing participantId', async () => {
+    const client = clientWith(() => Promise.resolve({ ok: true }))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_remove_group_member')!
+    await expect(execute(tool, { groupId: 'g1' })).rejects.toThrow('missing required property "participantId"')
   })
 
   it('list_executors maps executors to the view shape', async () => {

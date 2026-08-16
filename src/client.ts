@@ -263,6 +263,39 @@ export class CoAgentHubClient {
     return this.request<GroupMemberInfo[]>(`/groups/${encodeURIComponent(groupId)}/members`)
   }
 
+  /**
+   * Update a group's title and/or project binding (PATCH /groups/:id).
+   * Pass `projectPath: null` to clear the binding.
+   */
+  updateGroup(groupId: string, patch: { title?: string; projectPath?: string | null }): Promise<Group> {
+    return this.patchGroup(groupId, patch)
+  }
+
+  /**
+   * Add a member to a group (POST /groups/:id/members). The server returns the
+   * member row with its roles/prompt 分工信息; roles default to `['executor']`
+   * server-side when omitted.
+   */
+  addGroupMember(groupId: string, input: { participantId: string; roles?: string[] }): Promise<GroupMemberInfo> {
+    return this.request<GroupMemberInfo>(`/groups/${encodeURIComponent(groupId)}/members`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
+  /**
+   * Remove a member from a group (DELETE /groups/:id/members/:participantId).
+   * The server may answer 204 with no body; in that case return `{ ok: true }`.
+   */
+  async removeGroupMember(groupId: string, participantId: string): Promise<{ ok: boolean } | void> {
+    const result = await this.request<{ ok: boolean } | undefined>(
+      `/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(participantId)}`,
+      { method: 'DELETE' },
+    )
+    // 204 无 body 时 request() 返回 undefined,按成功处理返回 { ok: true }。
+    return result ?? { ok: true }
+  }
+
   /** List registered executors (GET /executors). */
   listExecutors(): Promise<Executor[]> {
     return this.request<Executor[]>('/executors')

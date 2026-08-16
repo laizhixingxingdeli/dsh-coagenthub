@@ -190,4 +190,82 @@ describe('CoAgentHubClient', () => {
     expect(init.method).toBe('PATCH')
     expect(JSON.parse(String(init.body))).toEqual({ brief: '新任务书' })
   })
+
+  it('updateGroup PATCHes title/projectPath to the group endpoint and returns the group', async () => {
+    const group = {
+      id: 'g1',
+      title: '改名后的群',
+      status: 'active',
+      createdBy: 'u1',
+      createdAt: '',
+      updatedAt: '',
+      memberCount: 0,
+      projectPath: '/mac/path',
+    }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(group))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    const result = await client.updateGroup('g1', { title: '改名后的群', projectPath: '/mac/path' })
+
+    expect(result).toEqual(group)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${DEFAULT_API_BASE}/groups/g1`)
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ title: '改名后的群', projectPath: '/mac/path' })
+  })
+
+  it('updateGroup passes projectPath null through to clear the binding', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'g1', title: 'T', status: 'active', projectPath: null }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    await client.updateGroup('g1', { projectPath: null })
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ projectPath: null })
+  })
+
+  it('addGroupMember POSTs participantId and roles to the members endpoint', async () => {
+    const member = {
+      participantId: 'e1',
+      name: 'AtomCode 执行器',
+      device: 'mac',
+      roles: ['executor'],
+      prompt: '执行任务',
+      joinedAt: '2026-08-15T06:00:00.000Z',
+    }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(member))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    const result = await client.addGroupMember('g1', { participantId: 'e1', roles: ['executor'] })
+
+    expect(result).toEqual(member)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${DEFAULT_API_BASE}/groups/g1/members`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ participantId: 'e1', roles: ['executor'] })
+  })
+
+  it('removeGroupMember DELETEs the member and returns { ok: true } on an empty body (204)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    const result = await client.removeGroupMember('g1', 'e1')
+
+    expect(result).toEqual({ ok: true })
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${DEFAULT_API_BASE}/groups/g1/members/e1`)
+    expect(init.method).toBe('DELETE')
+  })
+
+  it('removeGroupMember passes through a JSON body when the server returns one', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    await expect(client.removeGroupMember('g1', 'e1')).resolves.toEqual({ ok: true })
+  })
 })

@@ -91,6 +91,29 @@ function requireGroupId(groupId: string | undefined): string {
 }
 
 /**
+ * Convert a client-level failure into a clear tool-facing error:
+ * 404 → a specific not-found message, other HTTP statuses → status + server
+ * reason, network failures → a connection message. CoAgentHubError /
+ * CoAgentHubFetchError are converted; any other unexpected error is re-thrown
+ * as-is (matches the existing per-tool catch blocks).
+ */
+function throwToolError(error: unknown, notFoundMessage: string): never {
+  if (error instanceof CoAgentHubError) {
+    if (error.status === 404) throw new Error(notFoundMessage)
+    const reason = serverErrorMessage(error)
+    throw new Error(
+      reason === ''
+        ? `CoAgentHub API 错误(${error.status})`
+        : `CoAgentHub API 错误(${error.status}): ${reason}`,
+    )
+  }
+  if (error instanceof CoAgentHubFetchError) {
+    throw new Error(`无法连接 CoAgentHub 服务: ${error.message}`)
+  }
+  throw error
+}
+
+/**
  * Normalize a member's `roles` to a string array: arrays pass through, a
  * single string is wrapped (server may send one role as a string), anything
  * else (missing/null) becomes an empty array — never `undefined`.
@@ -209,6 +232,25 @@ const GROUP_MEMBER_VIEW_SCHEMA = {
     roles: { type: 'array', items: { type: 'string' }, required: true },
     prompt: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
     joinedAt: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+  },
+} as const
+
+const GROUP_UPDATE_VIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    title: { type: 'string', required: true },
+    status: { type: 'string', required: true },
+    projectPath: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+  },
+} as const
+
+const REMOVE_MEMBER_VIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ok: { type: 'boolean', required: true },
   },
 } as const
 
@@ -682,6 +724,99 @@ export function createCoAgentHubTools(
             throw new Error(`无法连接 CoAgentHub 服务: ${error.message}`)
           }
           throw error
+        }
+      },
+    }),
+
+    defineTool({
+      name: 'coagenthub_update_group',
+      description:
+        'Update a CoAgentHub group: change its title and/or its project binding (projectPath). Pass projectPath as an empty string to clear the binding, or as a non-empty path to set it. groupId is required, and at least one of title / projectPath must be provided.',
+      parameters: {
+        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        title: { type: 'string', description: 'New group title.' },
+        projectPath: {
+          type: 'string',
+          description: 'Project path to bind; empty string clears the binding (projectPath: null).',
+        },
+      },
+      output: { schema: GROUP_UPDATE_VIEW_SCHEMA, render: renderValue },
+      async execute(args: { groupId: string; title?: string; projectPath?: string }) {
+        if (args.title === undefined && args.projectPath === undefined) {
+          throw new Error('title 和 projectPath 至少传一个:请提供要修改的字段')
+        }
+        const patch: { title?: string; projectPath?: string | null } = {}
+        if (args.title !== undefined) patch.title = args.title
+        if (args.projectPath !== undefined) {
+          const path = args.projectPath.trim()
+          patch.projectPath = path === '' ? null : path
+        }
+        try {
+          const group = await client.updateGroup(args.groupId, patch)
+          return {
+            id: group.id,
+            title: group.title,
+            status: group.status,
+            projectPath: group.projectPath ?? null,
+          }
+        } catch (error) {
+          throwToolError(error, '群组不存在(404)')
+        }
+      },
+    }),
+
+    defineTool({
+      name: 'coagenthub_add_group_member',
+      description:
+        'Add a member to a CoAgentHub group with optional roles (default ["executor"]) and return the server member row (participantId, name, device, roles, prompt, joinedAt).',
+      parameters: {
+        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        participantId: { type: 'string', required: true, description: 'Participant id of the member to add.' },
+        roles: {
+          type: 'array',
+          items: { type: 'string' },
+          default: ['executor'],
+          description: 'Roles for the new member (default ["executor"]).',
+        },
+      },
+      output: { schema: GROUP_MEMBER_VIEW_SCHEMA, render: renderValue },
+      async execute(args: { groupId: string; participantId: string; roles?: string[] }) {
+        try {
+          const member = await client.addGroupMember(args.groupId, {
+            participantId: args.participantId,
+            roles: args.roles === undefined ? ['executor'] : args.roles,
+          })
+          // 归一化:缺失的 device/prompt/joinedAt 补 null、roles 兜底为数组,
+          // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
+          return {
+            participantId: member.participantId,
+            name: member.name,
+            device: member.device ?? null,
+            roles: normalizeMemberRoles(member.roles),
+            prompt: member.prompt ?? null,
+            joinedAt: member.joinedAt ?? null,
+          }
+        } catch (error) {
+          throwToolError(error, '群组或成员不存在(404)')
+        }
+      },
+    }),
+
+    defineTool({
+      name: 'coagenthub_remove_group_member',
+      description:
+        'Remove a member from a CoAgentHub group by participant id. Returns { ok: true } on success; a missing member or group yields a clear 404 error.',
+      parameters: {
+        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        participantId: { type: 'string', required: true, description: 'Participant id of the member to remove.' },
+      },
+      output: { schema: REMOVE_MEMBER_VIEW_SCHEMA, render: renderValue },
+      async execute(args: { groupId: string; participantId: string }) {
+        try {
+          await client.removeGroupMember(args.groupId, args.participantId)
+          return { ok: true }
+        } catch (error) {
+          throwToolError(error, '成员或群组不存在(404):请检查 participantId 与 groupId')
         }
       },
     }),
