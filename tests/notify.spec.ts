@@ -44,12 +44,12 @@ afterEach(() => {
 })
 
 describe('DshAgentPushAdapter', () => {
-  it('queues a plugin-sourced user message via followup on the resolved agent', () => {
+  it('queues a plugin-sourced user message via followup on the resolved agent', async () => {
     const agent = agentStub('agent-1')
     const adapter = new DshAgentPushAdapter({ resolveAgent: () => asAgent(agent) })
     const notification = makeNotification()
 
-    adapter.push(notification)
+    await adapter.push(notification)
 
     expect(agent.followup).toHaveBeenCalledTimes(1)
     const message = agent.followup.mock.calls[0]![0] as { role: string; content: Array<{ type: string; text: string }>; source: { kind: string; plugin: string } }
@@ -59,9 +59,66 @@ describe('DshAgentPushAdapter', () => {
     expect(message.source).toMatchObject({ kind: 'plugin', plugin: 'coagenthub' })
   })
 
-  it('throws when no live agent can be resolved', () => {
+  it('rejects when no live agent can be resolved', async () => {
     const adapter = new DshAgentPushAdapter({ resolveAgent: () => undefined })
-    expect(() => adapter.push(makeNotification())).toThrow('no live dsh agent to followup')
+    await expect(adapter.push(makeNotification())).rejects.toThrow('no live dsh agent to followup')
+  })
+
+  it('pushes a notification when its group matches the resolved session group', async () => {
+    const agent = agentStub('agent-1')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => asAgent(agent),
+      resolveSessionGroupId: () => 'g1',
+    })
+
+    await adapter.push(makeNotification({ groupId: 'g1' }))
+
+    expect(agent.followup).toHaveBeenCalledTimes(1)
+    expect(notificationQueue.size).toBe(0)
+  })
+
+  it('enqueues a notification from another group without pushing it', async () => {
+    const agent = agentStub('agent-1')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => asAgent(agent),
+      resolveSessionGroupId: () => 'g1',
+    })
+
+    await adapter.push(makeNotification({ groupId: 'g2' }))
+
+    expect(agent.followup).not.toHaveBeenCalled()
+    expect(notificationQueue.size).toBe(1)
+    expect(notificationQueue.drain()[0]).toMatchObject({ groupId: 'g2' })
+  })
+
+  it('enqueues everything when the session cwd cannot be resolved (no group id)', async () => {
+    const agent = agentStub('agent-1')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => asAgent(agent),
+      resolveSessionGroupId: () => null,
+    })
+
+    await adapter.push(makeNotification())
+
+    expect(agent.followup).not.toHaveBeenCalled()
+    expect(notificationQueue.size).toBe(1)
+    expect(notificationQueue.drain()[0]).toMatchObject({ taskId: 't1' })
+  })
+
+  it('enqueues everything when the session-group resolver throws', async () => {
+    const agent = agentStub('agent-1')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => asAgent(agent),
+      resolveSessionGroupId: () => {
+        throw new Error('listGroups failed')
+      },
+    })
+
+    await adapter.push(makeNotification())
+
+    expect(agent.followup).not.toHaveBeenCalled()
+    expect(notificationQueue.size).toBe(1)
+    expect(notificationQueue.drain()[0]).toMatchObject({ taskId: 't1' })
   })
 })
 
@@ -88,13 +145,13 @@ describe('createNotificationDeliverer', () => {
     expect(notificationQueue.size).toBe(0)
   })
 
-  it('falls back to the queue when no live agent can be resolved', () => {
+  it('falls back to the queue when no live agent can be resolved', async () => {
     const deliverer = createNotificationDeliverer(new DshAgentPushAdapter({ resolveAgent: () => undefined }))
 
     deliverer.deliver(makeNotification())
 
     // 无 live agent 时不丢通知:入队,agent 可用 get_notifications 补读。
-    expect(notificationQueue.size).toBe(1)
+    await vi.waitFor(() => expect(notificationQueue.size).toBe(1))
     expect(notificationQueue.drain()[0]).toMatchObject({ taskId: 't1' })
   })
 
@@ -106,7 +163,7 @@ describe('createNotificationDeliverer', () => {
     expect(notificationQueue.size).toBe(1)
   })
 
-  it('falls back to the queue when followup throws', () => {
+  it('falls back to the queue when followup throws', async () => {
     const agent = agentStub('agent-1')
     agent.followup.mockImplementation(() => {
       throw new Error('followup failed')
@@ -116,7 +173,7 @@ describe('createNotificationDeliverer', () => {
     deliverer.deliver(makeNotification())
 
     // 推送失败不丢通知:入队,agent 可用 get_notifications 补读。
-    expect(notificationQueue.size).toBe(1)
+    await vi.waitFor(() => expect(notificationQueue.size).toBe(1))
     expect(notificationQueue.drain()[0]).toMatchObject({ taskId: 't1' })
   })
 
@@ -173,7 +230,7 @@ describe('createNotificationDeliverer', () => {
     expect(notificationQueue.size).toBe(1)
   })
 
-  it('falls back to the queue when the runtime-switched adapter throws', () => {
+  it('falls back to the queue when the runtime-switched adapter throws', async () => {
     const agent = agentStub('agent-1')
     agent.followup.mockImplementation(() => {
       throw new Error('followup failed')
@@ -184,7 +241,7 @@ describe('createNotificationDeliverer', () => {
     deliverer.deliver(makeNotification())
 
     // 切换后的适配器抛错:不丢通知,回落队列补读。
-    expect(notificationQueue.size).toBe(1)
+    await vi.waitFor(() => expect(notificationQueue.size).toBe(1))
     expect(notificationQueue.drain()[0]).toMatchObject({ taskId: 't1' })
   })
 

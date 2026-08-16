@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, type LoggerService } from '@deepseek-ai/cordis'
-import { apply, inject, name } from '../src/index.ts'
+import { apply, inject, name, resolveGroupIdForCwd } from '../src/index.ts'
 
 /** Fake WebSocket: never connects, so no real network or reconnect timers. */
 class FakeWebSocket {
@@ -87,5 +87,31 @@ describe('plugin startup', () => {
       expect(logs.some(log => log.type === 'warn' && String(log.args[0]).includes('agents 服务已下线'))).toBe(true)
     })
     await fiber.dispose()
+  })
+})
+
+describe('resolveGroupIdForCwd', () => {
+  const groups = [
+    { id: 'g1', title: '项目A', projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub' },
+    { id: 'g2', title: '项目B', projectPath: '/Users/apple/Desktop/Projects/other-repo' },
+  ]
+
+  it('resolves the group whose projectPath matches the session cwd', () => {
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, undefined)).toBe('g1')
+  })
+
+  it('falls back to the active group setting when cwd matches no group', () => {
+    const settings = { activeGroupId: 'g2' }
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/unmapped', groups, settings)).toBe('g2')
+  })
+
+  it('returns null when cwd matches no group and no active group is set', () => {
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/unmapped', groups, undefined)).toBeNull()
+  })
+
+  it('returns null when the session has no usable cwd', () => {
+    expect(resolveGroupIdForCwd(undefined, groups, undefined)).toBeNull()
+    expect(resolveGroupIdForCwd(null, groups, undefined)).toBeNull()
+    expect(resolveGroupIdForCwd('   ', groups, undefined)).toBeNull()
   })
 })

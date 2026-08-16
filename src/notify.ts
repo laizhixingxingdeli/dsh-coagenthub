@@ -71,6 +71,14 @@ function notificationTypeLabel(type: CoAgentHubNotificationType): string {
 export interface DshAgentPushAdapterOptions {
   /** 推送时解析可注入的 agent;后台上下文无稳定句柄,每次推送现查。 */
   resolveAgent: () => Agent | undefined
+  /**
+   * 推送前按会话隔离:反查当前会话 cwd 对应的群 id(通常用
+   * findGroupByWorkspaceCwd)。返回该群 id 时,只有 `notification.groupId`
+   * 与之相等的通知才会 followup 推送;返回 null/undefined/空串(无法解析
+   * cwd 或反查不到群)或解析抛错时,通知只入队不推送,由对应会话的
+   * `coagenthub_get_notifications` 按 cwd 拉取,不丢失、不串群。
+   */
+  resolveSessionGroupId?: () => string | null | undefined | Promise<string | null | undefined>
   /** 可选日志回调(推送成功 / 回退说明)。 */
   log?: (message: string) => void
 }
@@ -78,21 +86,43 @@ export interface DshAgentPushAdapterOptions {
 /**
  * 基于 dsh `Agent.followup(UserMessage)` 的主动推送适配器。通知被包装成
  * plugin 来源的用户消息,排队为当前 agent 的 next-turn 消息并唤醒 driver;
- * 解析不到 agent 时抛出,由 deliverer 回退队列。
+ * 解析不到 agent 时抛出,由 deliverer 回退队列。配置了
+ * `resolveSessionGroupId` 时,推送前按会话 cwd 过滤:只把当前会话对应群的
+ * 通知推入本会话,其他群的通知入队隔离(0.0.16 后 TaskWatcher 收集所有群
+ * 通知,推送侧必须按会话过滤,否则其他群通知被注入当前会话上下文)。
  */
 export class DshAgentPushAdapter implements PushAdapter {
   private readonly resolveAgent: () => Agent | undefined
+  private readonly resolveSessionGroupId?: () => string | null | undefined | Promise<string | null | undefined>
   private readonly log?: (message: string) => void
 
   constructor(options: DshAgentPushAdapterOptions) {
     this.resolveAgent = options.resolveAgent
+    this.resolveSessionGroupId = options.resolveSessionGroupId
     this.log = options.log
   }
 
-  push(notification: CoAgentHubNotification): void {
+  async push(notification: CoAgentHubNotification): Promise<void> {
     const agent = this.resolveAgent()
     if (agent === undefined) {
       throw new Error('no live dsh agent to followup')
+    }
+    if (this.resolveSessionGroupId !== undefined) {
+      let sessionGroupId: string | null | undefined
+      try {
+        sessionGroupId = await this.resolveSessionGroupId()
+      } catch {
+        sessionGroupId = null // 反查失败视为无法解析:全部入队,不丢通知。
+      }
+      const resolved = typeof sessionGroupId === 'string' && sessionGroupId.trim() !== ''
+      if (!resolved || notification.groupId !== sessionGroupId) {
+        // 会话 cwd 不可解析,或通知属于其他群:只入队,由对应会话按 cwd 拉取,
+        // 不注入当前会话上下文(会话隔离)。
+        notificationQueue.enqueue(notification)
+        const where = resolved ? `当前会话群 ${sessionGroupId} 不匹配` : '无法解析会话 cwd 对应群'
+        this.log?.(`[coagenthub] ${where},通知(群 ${notification.groupId})入队待 coagenthub_get_notifications 补读: ${formatNotification(notification)}`)
+        return
+      }
     }
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: formatNotification(notification) }],
