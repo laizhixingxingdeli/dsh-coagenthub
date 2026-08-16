@@ -18,6 +18,29 @@ export const WORKSPACE_STATUS_PATH = '/coagenthub-api/workspace-status'
 /** localStorage key remembering the currently selected virtual workspace. */
 export const ACTIVE_GROUP_STORAGE_KEY = 'coagenthub.activeGroupId'
 
+/** localStorage key (dsh web front end) holding the current dsh session id. */
+export const DSH_SESSION_STORAGE_KEY = 'dsh.sessions.current'
+
+/** Per-session localStorage key prefix: `coagenthub.activeGroup.<sessionId>`. */
+export const ACTIVE_GROUP_SESSION_KEY_PREFIX = 'coagenthub.activeGroup.'
+
+/** Read the current dsh session id; null when absent or unparsable. */
+export function getCurrentDshSessionId(): string | null {
+  try {
+    const raw = localStorage.getItem(DSH_SESSION_STORAGE_KEY)
+    if (raw === null || raw === '') return null
+    const parsed = JSON.parse(raw) as { sessionId?: unknown }
+    return typeof parsed.sessionId === 'string' && parsed.sessionId !== '' ? parsed.sessionId : null
+  } catch {
+    return null
+  }
+}
+
+/** Per-session localStorage key remembering the selected workspace. */
+export function activeGroupSessionKey(sessionId: string): string {
+  return `${ACTIVE_GROUP_SESSION_KEY_PREFIX}${sessionId}`
+}
+
 export interface PathMappingRuleView {
   macPrefix: string
   winPrefix: string
@@ -57,9 +80,18 @@ export async function saveActiveGroupId(groupId: string | null): Promise<void> {
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
 }
 
-/** Read the remembered selection; null when absent or localStorage unusable. */
+/**
+ * Read the remembered selection; null when absent or localStorage unusable.
+ * Prefers the current dsh session's per-session key, falling back to the
+ * global key (pre-session behavior) when no session or no per-session entry.
+ */
 export function readActiveGroupId(): string | null {
   try {
+    const sessionId = getCurrentDshSessionId()
+    if (sessionId !== null) {
+      const perSession = localStorage.getItem(activeGroupSessionKey(sessionId))
+      if (perSession !== null && perSession !== '') return perSession
+    }
     const raw = localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)
     return raw !== null && raw !== '' ? raw : null
   } catch {
@@ -67,11 +99,21 @@ export function readActiveGroupId(): string | null {
   }
 }
 
-/** Remember the selection in localStorage (best-effort). */
+/**
+ * Remember the selection in localStorage (best-effort). Writes the current
+ * dsh session's per-session key AND the global key (kept for compatibility
+ * with the host mirror and pre-session consumers).
+ */
 export function writeActiveGroupId(groupId: string | null): void {
   try {
-    if (groupId === null || groupId === '') localStorage.removeItem(ACTIVE_GROUP_STORAGE_KEY)
-    else localStorage.setItem(ACTIVE_GROUP_STORAGE_KEY, groupId)
+    const sessionId = getCurrentDshSessionId()
+    if (groupId === null || groupId === '') {
+      localStorage.removeItem(ACTIVE_GROUP_STORAGE_KEY)
+      if (sessionId !== null) localStorage.removeItem(activeGroupSessionKey(sessionId))
+    } else {
+      localStorage.setItem(ACTIVE_GROUP_STORAGE_KEY, groupId)
+      if (sessionId !== null) localStorage.setItem(activeGroupSessionKey(sessionId), groupId)
+    }
   } catch {
     // 持久化失败不影响本次选择
   }

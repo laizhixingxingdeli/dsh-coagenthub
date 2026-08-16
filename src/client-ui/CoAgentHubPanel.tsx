@@ -15,6 +15,7 @@ import { CoAgentHubExecutorsPanel } from './CoAgentHubExecutorsPanel.tsx'
 import { CoAgentHubSettings, fetchSettings } from './CoAgentHubSettings.tsx'
 import {
   fetchWorkspaceStatus,
+  getCurrentDshSessionId,
   isWindowsPlatform,
   readActiveGroupId,
   saveActiveGroupId,
@@ -133,6 +134,8 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
   // 当前虚拟工作区:localStorage 记住;host 设置镜像让 agent 侧工具可读。
   const [activeGroupId, setActiveGroupId] = useState<string | null>(() => readActiveGroupId())
   const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceStatusView | null>(null)
+  // 上次看到的 dsh 会话 id;变化时重新读取该会话记忆的工作区。
+  const lastSessionIdRef = useRef<string | null>(null)
 
   // 加载群投影状态;保存设置后(reloadKey)重新拉取,映射规则变化能反映到下拉。
   useEffect(() => {
@@ -156,6 +159,35 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
     }
     return () => { alive = false }
   }, [reloadKey])
+
+  // dsh 会话切换检测:轻量轮询(1s)对比上次 sessionId;变化时重新读取该会话
+  // 记忆的工作区并刷新状态。visibilitychange / focus 时无条件重读(即使会话
+  // 未变,也刷新为该会话最新的记忆值)。
+  useEffect(() => {
+    const refreshForSession = (): void => {
+      const sessionId = getCurrentDshSessionId()
+      if (sessionId !== lastSessionIdRef.current) {
+        lastSessionIdRef.current = sessionId
+        setActiveGroupId(readActiveGroupId())
+      }
+    }
+    const forceRefresh = (): void => {
+      lastSessionIdRef.current = getCurrentDshSessionId()
+      setActiveGroupId(readActiveGroupId())
+    }
+    refreshForSession()
+    const timer = window.setInterval(refreshForSession, 1000)
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'visible') forceRefresh()
+    }
+    window.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', forceRefresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', forceRefresh)
+    }
+  }, [])
 
   const handleWorkspaceChange = (event: React.ChangeEvent<HTMLSelectElement>): void => {
     const next = event.target.value === '' ? null : event.target.value

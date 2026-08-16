@@ -3,7 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { CoAgentHubGroupList, DEFAULT_API_BASE, GROUP_LIST_LIMIT } from '../src/client-ui/CoAgentHubGroupList.tsx'
 import { CoAgentHubPanel, PANEL_POSITION_KEY, PANEL_TABS } from '../src/client-ui/CoAgentHubPanel.tsx'
-import { ACTIVE_GROUP_STORAGE_KEY, saveActiveGroupId } from '../src/client-ui/workspace-status.ts'
+import {
+  ACTIVE_GROUP_STORAGE_KEY,
+  ACTIVE_GROUP_SESSION_KEY_PREFIX,
+  activeGroupSessionKey,
+  getCurrentDshSessionId,
+  readActiveGroupId,
+  saveActiveGroupId,
+  writeActiveGroupId,
+} from '../src/client-ui/workspace-status.ts'
 import { groupFetchMock, jsonResponse, groups } from './helpers.ts'
 
 afterEach(() => {
@@ -281,6 +289,35 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
       expect((screen.getByLabelText('选择群组') as HTMLSelectElement).value).toBe('g1')
     })
   })
+
+  it('sessionId 变化时面板重新读取新会话记忆的工作区', async () => {
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
+    localStorage.setItem(activeGroupSessionKey('session-a'), 'g1')
+    vi.stubGlobal('fetch', workspacePanelFetchMock([PROJECTION]))
+
+    render(<CoAgentHubPanel />)
+
+    const select = (await screen.findByLabelText('当前工作区')) as HTMLSelectElement
+    await waitFor(() => {
+      expect(select.querySelectorAll('option')).toHaveLength(2)
+    })
+    expect(select.value).toBe('g1')
+
+    // 切换到 session-b:该会话没有记忆 → 回退全局(未设置 → 未选择)
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-b' }))
+    window.dispatchEvent(new Event('focus'))
+
+    await waitFor(() => {
+      expect(select.value).toBe('')
+    })
+
+    // session-b 有了自己的记忆后,focus 刷新应恢复它
+    localStorage.setItem(activeGroupSessionKey('session-b'), 'g1')
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => {
+      expect(select.value).toBe('g1')
+    })
+  })
 })
 
 describe('workspace selection helpers', () => {
@@ -295,5 +332,56 @@ describe('workspace selection helpers', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ activeGroupId: '' }),
     }))
+  })
+})
+
+describe('dsh 会话隔离工作区记忆', () => {
+  const SESSION_STORAGE_KEY = 'dsh.sessions.current'
+
+  it('getCurrentDshSessionId 解析 localStorage 中的 sessionId', () => {
+    expect(getCurrentDshSessionId()).toBeNull()
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessionId: 'session-abc' }))
+    expect(getCurrentDshSessionId()).toBe('session-abc')
+    // 空 sessionId / 非法 JSON 都回退 null
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessionId: '' }))
+    expect(getCurrentDshSessionId()).toBeNull()
+    localStorage.setItem(SESSION_STORAGE_KEY, 'not-json')
+    expect(getCurrentDshSessionId()).toBeNull()
+  })
+
+  it('有 sessionId 时读写 coagenthub.activeGroup.<sessionId>,同时保留全局 key', () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessionId: 'session-abc' }))
+
+    writeActiveGroupId('g1')
+
+    expect(localStorage.getItem(activeGroupSessionKey('session-abc'))).toBe('g1')
+    expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBe('g1')
+    // 清除时两个 key 一起清
+    writeActiveGroupId(null)
+    expect(localStorage.getItem(activeGroupSessionKey('session-abc'))).toBeNull()
+    expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBeNull()
+  })
+
+  it('有 sessionId 时读取优先 per-session key,无记录时回退全局 key', () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessionId: 'session-abc' }))
+    localStorage.setItem(ACTIVE_GROUP_STORAGE_KEY, 'g-global')
+
+    // 该会话没有记忆 → 回退全局
+    expect(readActiveGroupId()).toBe('g-global')
+
+    // 该会话有记忆 → 优先 per-session
+    localStorage.setItem(activeGroupSessionKey('session-abc'), 'g-per')
+    expect(readActiveGroupId()).toBe('g-per')
+  })
+
+  it('无 sessionId 时读写只走全局 key', () => {
+    expect(getCurrentDshSessionId()).toBeNull()
+
+    writeActiveGroupId('g1')
+    expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBe('g1')
+    // 不产生任何 per-session key
+    expect(Object.keys(localStorage).filter((key) => key.startsWith(ACTIVE_GROUP_SESSION_KEY_PREFIX))).toHaveLength(0)
+
+    expect(readActiveGroupId()).toBe('g1')
   })
 })
