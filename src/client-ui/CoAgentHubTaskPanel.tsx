@@ -6,11 +6,10 @@
  * the conversation). Fetches through the same-origin proxy route the host half
  * registers (default `/coagenthub-api`), auto-refreshes running tasks every
  * 15s, copies a task id on demand, and opens the full output in a new browser
- * tab via `/coagenthub-api/raw/<taskId>`. After every refresh the panel diffs
- * the previous round's `taskId -> status` and shows a non-blocking reminder
- * banner when a task newly reaches `done` / `failed` / `cancelled` (once per
- * task+status, ~8s auto-dismiss or manual close; a hidden tab may also get a
- * desktop Notification).
+ * tab via `/coagenthub-api/raw/<taskId>`. Task completion
+ * (`done` / `failed` / `cancelled`) is surfaced by the host's session
+ * notification system, so the panel itself shows no completion reminder
+ * banner and triggers no desktop Notification.
  * @module @laizhixingxingdeli/dsh-coagenthub/client-ui
  */
 
@@ -20,9 +19,6 @@ import { DEFAULT_API_BASE, fetchGroups, type CoAgentHubGroupView } from './CoAge
 
 /** Auto-refresh interval (ms) while a group is selected and tasks are shown. */
 export const TASK_REFRESH_MS = 15_000
-
-/** How long a status-change reminder banner stays visible before auto-dismiss (ms). */
-export const REMINDER_DISMISS_MS = 8_000
 
 /** Statuses that are worth a completion reminder banner. */
 const REMIND_STATUSES = new Set(['done', 'failed', 'cancelled'])
@@ -371,13 +367,6 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
   const stateRef = useRef<LoadState>({ kind: 'idle' })
   // The group whose tasks the current ready state displays; only same-group refreshes keep the list.
   const loadedGroupRef = useRef<string | null>(null)
-  // Completion reminders: visible banners + the per-round diff state (baseline
-  // groups / last-seen status / already-reminded task+status).
-  const [reminders, setReminders] = useState<CoAgentHubTaskReminder[]>([])
-  const baselineGroupsRef = useRef(new Set<string>())
-  const prevStatusRef = useRef(new Map<string, string>())
-  const remindedRef = useRef(new Set<string>())
-  const reminderTimersRef = useRef(new Map<string, number>())
 
   // Load the group list once (reused by the dropdown).
   useEffect(() => {
@@ -427,20 +416,6 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
         if (alive) {
           loadedGroupRef.current = groupId
           setState({ kind: 'ready', tasks })
-          // 每轮刷新后对比上一轮 taskId -> status,新变为 done/failed/cancelled 的任务生成提醒。
-          const fresh = diffTaskStatuses(
-            baselineGroupsRef.current, prevStatusRef.current, remindedRef.current, groupId, tasks, participantNamesRef.current,
-          )
-          if (fresh.length > 0) {
-            setReminders((prev) => [...prev, ...fresh])
-            for (const reminder of fresh) {
-              reminderTimersRef.current.set(
-                reminder.key,
-                window.setTimeout(() => dismissReminder(reminder.key), REMINDER_DISMISS_MS),
-              )
-            }
-            notifyDesktop(fresh)
-          }
         }
       },
       (error: unknown) => {
@@ -497,24 +472,6 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
     setSearchTerm('')
   }
 
-  /** Dismiss one reminder banner (manual close or auto-dismiss timer). */
-  const dismissReminder = (key: string): void => {
-    const timer = reminderTimersRef.current.get(key)
-    if (timer !== undefined) {
-      window.clearTimeout(timer)
-      reminderTimersRef.current.delete(key)
-    }
-    setReminders((prev) => prev.filter((reminder) => reminder.key !== key))
-  }
-
-  // Clear any pending auto-dismiss timers when the panel unmounts.
-  useEffect(() => {
-    return () => {
-      for (const timer of reminderTimersRef.current.values()) window.clearTimeout(timer)
-      reminderTimersRef.current.clear()
-    }
-  }, [])
-
   const tasks = state.kind === 'ready' ? state.tasks : []
   return (
     <section className={css.content} aria-label="CoAgentHub 任务面板">
@@ -540,33 +497,6 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
           刷新
         </button>
       </div>
-      {reminders.length > 0 && (
-        <div className={css.reminderArea}>
-          {reminders.map((reminder) => (
-            <div
-              key={reminder.key}
-              className={css.reminder}
-              data-status={reminder.status}
-              role="status"
-            >
-              <span className={css.reminderStatus}>{statusLabel(reminder.status)}</span>
-              {reminder.executor !== '' && (
-                <span className={css.reminderExecutor}>{reminder.executor}</span>
-              )}
-              <span className={css.reminderSummary}>{reminder.summary}</span>
-              <button
-                type="button"
-                className={css.reminderClose}
-                onClick={() => dismissReminder(reminder.key)}
-                aria-label="关闭提醒"
-                title="关闭提醒"
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
       <div className={css.body}>
         {groupsError !== null && (
           <p className={css.error} role="alert">群列表加载失败:{groupsError}</p>

@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   CoAgentHubTaskPanel,
-  REMINDER_DISMISS_MS,
   TASK_REFRESH_MS,
   attemptTimeline,
   capOutput,
@@ -568,7 +567,7 @@ describe('CoAgentHubTaskPanel', () => {
   })
 })
 
-describe('CoAgentHubTaskPanel reminders', () => {
+describe('CoAgentHubTaskPanel completion notices removed', () => {
   /** Fetch mock answering the group list first, then tasks whose status flips after the first call. */
   function flipFetchMock(initialStatus: string, nextStatus: string) {
     let tasksCall = 0
@@ -586,7 +585,7 @@ describe('CoAgentHubTaskPanel reminders', () => {
     })
   }
 
-  it('does not show a reminder banner on initial load, even for terminal tasks', async () => {
+  it('does not render a reminder banner on initial load, even for terminal tasks', async () => {
     vi.stubGlobal('fetch', groupFetchMock([task({ id: 't-done', status: 'done' })]))
     render(<CoAgentHubTaskPanel />)
     await selectGroup('g1')
@@ -594,66 +593,20 @@ describe('CoAgentHubTaskPanel reminders', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('shows a reminder banner when a task transitions running → done on refresh', async () => {
+  it('does not render a reminder banner or fire a desktop notification when a task finishes', async () => {
+    const NotificationCtor = vi.fn()
+    vi.stubGlobal('Notification', Object.assign(NotificationCtor, { permission: 'granted' }))
     vi.stubGlobal('fetch', flipFetchMock('running', 'done'))
     render(<CoAgentHubTaskPanel />)
     await selectGroup('g1')
     await screen.findByText('执行中')
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await screen.findByText('已完成')
+
+    // 面板不再渲染 reminder 横幅,也不再调用桌面通知
     expect(screen.queryByRole('status')).toBeNull()
-
-    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
-
-    const banner = await screen.findByRole('status')
-    expect(within(banner).getByText('已完成')).toBeTruthy()
-    expect(within(banner).getByText('atomcode')).toBeTruthy()
-    expect(within(banner).getByText('实现登录页')).toBeTruthy()
-  })
-
-  it('does not remind twice for the same task and status', async () => {
-    const fetchMock = flipFetchMock('running', 'done')
-    vi.stubGlobal('fetch', fetchMock)
-    render(<CoAgentHubTaskPanel />)
-    await selectGroup('g1')
-    await screen.findByText('执行中')
-
-    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
-    await screen.findByRole('status')
-    expect(screen.getAllByRole('status')).toHaveLength(1)
-
-    // 再次刷新,任务仍为 done:同一任务同一状态不重复提醒
-    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3))
-    expect(screen.getAllByRole('status')).toHaveLength(1)
-  })
-
-  it('dismisses a reminder banner via its close button', async () => {
-    vi.stubGlobal('fetch', flipFetchMock('running', 'done'))
-    render(<CoAgentHubTaskPanel />)
-    await selectGroup('g1')
-    await screen.findByText('执行中')
-
-    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
-    const banner = await screen.findByRole('status')
-
-    fireEvent.click(within(banner).getByRole('button', { name: '关闭提醒' }))
-    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
-  })
-
-  it('auto-dismisses a reminder banner after ~8 seconds', async () => {
-    vi.useFakeTimers()
-    vi.stubGlobal('fetch', flipFetchMock('running', 'done'))
-    render(<CoAgentHubTaskPanel />)
-    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    fireEvent.change(screen.getByLabelText('选择群组'), { target: { value: 'g1' } })
-    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    expect(screen.getByText('执行中')).toBeTruthy()
-
-    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
-    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    expect(screen.getAllByRole('status')).toHaveLength(1)
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(REMINDER_DISMISS_MS) })
-    expect(screen.queryByRole('status')).toBeNull()
+    expect(NotificationCtor).not.toHaveBeenCalled()
   })
 })
 
