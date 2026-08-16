@@ -326,7 +326,13 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
           />
         )}
         {tab === 'executors' && <CoAgentHubExecutorsPanel key={`executors-${reloadKey}`} apiBase={apiBase} />}
-        {tab === 'settings' && <CoAgentHubSettings onSaved={() => setReloadKey((v) => v + 1)} />}
+        {tab === 'settings' && (
+          <CoAgentHubSettings
+            onSaved={() => setReloadKey((v) => v + 1)}
+            // 会话记忆的工作区:切换 dsh 会话时轮询/focus 已刷新 activeGroupId,设置页随 prop 同步。
+            activeGroupId={activeGroupId ?? ''}
+          />
+        )}
       </div>
       {/* 右下角拖拽手柄(pointer-events:auto,避开 overlay 点击穿透) */}
       <div

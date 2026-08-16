@@ -52,6 +52,11 @@ export async function saveSettings(patch: CoAgentHubSettingsView): Promise<CoAge
 export interface CoAgentHubSettingsProps {
   /** Called after a successful save; the panel uses it to reload the other tabs. */
   onSaved?: () => void
+  /**
+   * 当前 dsh 会话记忆的工作区(由面板传入,面板已按会话切换刷新);缺省
+   * (undefined)时回退 fetchSettings 的全局 activeGroupId。
+   */
+  activeGroupId?: string
 }
 
 type LoadState =
@@ -78,7 +83,7 @@ type SetupState =
  * 虚拟工作区 section (mapping status + one-click setup). Pre-fills from the
  * host on mount and shows「已保存,立即生效」after a successful save.
  */
-export function CoAgentHubSettings({ onSaved }: CoAgentHubSettingsProps) {
+export function CoAgentHubSettings({ onSaved, activeGroupId: sessionActiveGroupId }: CoAgentHubSettingsProps) {
   const [apiBase, setApiBase] = useState('')
   const [participantId, setParticipantId] = useState('')
   const [activeGroupId, setActiveGroupId] = useState('')
@@ -181,12 +186,14 @@ export function CoAgentHubSettings({ onSaved }: CoAgentHubSettingsProps) {
   const workspaces = status?.workspaces ?? []
   const registeredCount = workspaces.filter(workspace => workspace.registered === true).length
 
-  // 只读状态区数据:participantId 来自 fetchSettings();工作区群名由
-  // activeGroupId 在 workspace-status 的群列表里反查(找不到时回退显示 id)。
-  const activeWorkspace = workspaces.find(workspace => workspace.groupId === activeGroupId)
-  const activeGroupTitle = activeGroupId.trim() === ''
+  // 只读状态区数据:participantId 来自 fetchSettings();「当前工作区」优先用面板
+  // 传入的会话记忆值(切换会话时面板已刷新),缺省时回退 fetchSettings 的全局
+  // activeGroupId;群名在 workspace-status 的群列表里反查(找不到时回退显示 id)。
+  const displayGroupId = sessionActiveGroupId !== undefined ? sessionActiveGroupId : activeGroupId
+  const activeWorkspace = workspaces.find(workspace => workspace.groupId === displayGroupId)
+  const activeGroupTitle = displayGroupId.trim() === ''
     ? null
-    : activeWorkspace?.groupTitle ?? activeGroupId
+    : activeWorkspace?.groupTitle ?? displayGroupId
 
   const handleCopyParticipantId = (): void => {
     const value = participantId.trim()

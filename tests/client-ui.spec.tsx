@@ -318,6 +318,38 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
       expect(select.value).toBe('g1')
     })
   })
+
+  it('切换会话后设置页「当前工作区」同步显示新会话记忆的群名', async () => {
+    const PROJECTION_B = {
+      groupId: 'g2',
+      groupTitle: 'dsh 实测-0814',
+      macPath: '/Users/apple/Desktop/Projects/qiuzhi',
+      winPath: 'Z:\\qiuzhi',
+      pathExists: true,
+      registered: true,
+    }
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
+    localStorage.setItem(activeGroupSessionKey('session-a'), 'g1')
+    vi.stubGlobal('fetch', workspacePanelFetchMock([PROJECTION, PROJECTION_B]))
+
+    render(<CoAgentHubPanel />)
+
+    // 进入设置页:显示 session-a 记忆的 g1 群名
+    fireEvent.click(screen.getByRole('tab', { name: '设置' }))
+    const statusValue = await screen.findByLabelText('当前工作区群名')
+    await waitFor(() => {
+      expect(statusValue.textContent).toContain('dsh-coagenthub 插件开发')
+    })
+
+    // 切换到 session-b(记忆 g2):focus 刷新后设置页应显示新群名
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-b' }))
+    localStorage.setItem(activeGroupSessionKey('session-b'), 'g2')
+    window.dispatchEvent(new Event('focus'))
+
+    await waitFor(() => {
+      expect(statusValue.textContent).toContain('dsh 实测-0814')
+    })
+  })
 })
 
 describe('workspace selection helpers', () => {

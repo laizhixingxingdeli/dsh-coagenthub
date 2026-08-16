@@ -152,6 +152,56 @@ describe('CoAgentHubSettings 当前身份与工作区 status area', () => {
     expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('dsh-coagenthub 插件开发')
   })
 
+  it('shows the group title from the activeGroupId prop when passed in', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({
+          mappingRule: null,
+          workspaces: [{ groupId: 'g1', groupTitle: 'dsh-coagenthub 插件开发' }],
+        }))
+      }
+      // fetchSettings 不返回 activeGroupId:显示完全由 prop 驱动。
+      return Promise.resolve(jsonResponse({ participantId: 'p-1' }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubSettings activeGroupId="g1" />)
+
+    expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('dsh-coagenthub 插件开发')
+  })
+
+  it('prefers the activeGroupId prop over the fetchSettings global value', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({
+          mappingRule: null,
+          workspaces: [{ groupId: 'g1', groupTitle: 'dsh-coagenthub 插件开发' }],
+        }))
+      }
+      // 全局配置里的 activeGroupId 已过期,会话记忆(prop)才是当前值。
+      return Promise.resolve(jsonResponse({ participantId: 'p-1', activeGroupId: 'g-stale' }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubSettings activeGroupId="g1" />)
+
+    expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('dsh-coagenthub 插件开发')
+  })
+
+  it('shows the raw group id when the prop value is not in the workspace list', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({ mappingRule: null, workspaces: [] }))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubSettings activeGroupId="g-unknown" />)
+
+    expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('g-unknown')
+  })
+
   it('shows 未选择 when no active group is selected', async () => {
     vi.stubGlobal('fetch', statusAreaFetchMock({}))
 
