@@ -137,6 +137,23 @@ describe('TaskWatcher.handleFrame', () => {
     expect(delivered).toHaveLength(0)
   })
 
+  it('ignores frames from other groups (active-group isolation)', () => {
+    const { watcher, delivered } = makeWatcher()
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g2', taskId: 't1', status: 'done' })
+    watcher.handleFrame({ type: 'task_stall_alert', groupId: 'g2', taskId: 't2', status: 'stalled' })
+    expect(delivered).toHaveLength(0)
+    // 当前群的帧仍正常投递。
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'done' })
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]!.groupId).toBe('g1')
+  })
+
+  it('ignores all frames when no active group is selected', () => {
+    const { watcher, delivered } = makeWatcher({ getActiveGroupId: () => undefined })
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'done' })
+    expect(delivered).toHaveLength(0)
+  })
+
   it('skips queued/running status on task_status_changed frames but delivers done', () => {
     const { watcher, delivered } = makeWatcher()
     watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'queued' })

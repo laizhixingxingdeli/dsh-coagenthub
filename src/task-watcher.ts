@@ -107,7 +107,12 @@ export class TaskWatcher {
 
   /** Route one WS frame to the matching notification type. */
   handleFrame(frame: WsEventFrame): void {
+    // 通知只属于当前 active group:其他群的帧(含未选群时的所有帧)直接忽略,
+    // 避免不同群的任务完成通知串到当前会话。
+    const activeGroupId = this.getActiveGroupId()
+    if (activeGroupId === undefined || activeGroupId.trim() === '') return
     const groupId = typeof frame.groupId === 'string' ? frame.groupId : undefined
+    if (groupId !== activeGroupId) return
     const time = new Date().toISOString()
     switch (frame.type) {
       case 'group_message': {

@@ -88,6 +88,42 @@
   color: var(--dsw-alias-label-error, #cf222e);
 }
 
+/* 当前身份与工作区:只读状态区(participantId + 工作区群名)。 */
+.statusSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.statusRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.statusValue {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.copy {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  cursor: pointer;
+}
+
+.copy:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 /* 虚拟工作区:映射规则状态 + 一键设置表单。 */
 .wsSection {
   display: flex;

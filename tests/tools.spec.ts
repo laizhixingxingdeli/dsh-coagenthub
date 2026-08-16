@@ -322,10 +322,29 @@ describe('createCoAgentHubTools', () => {
     }
   })
 
-  it('list_tasks requires a groupId', async () => {
-    const client = clientWith(() => Promise.resolve([]))
+  it('list_tasks auto-backfills the activeGroupId when groupId is omitted', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g1' })
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e1', name: 'AtomCode 执行器' })])
+      }
+      if (String(url).includes('/tasks')) {
+        return Promise.resolve([])
+      }
+      return Promise.resolve({ items: [], total: 0 })
+    })
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_list_tasks')!
+    const result = (await execute(tool, {})) as Array<{ groupId: string }>
+    expect(result).toEqual([])
+    const url = String((fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0])
+    expect(String(url)).toContain('/groups/g1/tasks')
+  })
+
+  it('list_tasks throws a clear error when no group can be resolved', async () => {
+    const client = clientWith(() => Promise.resolve({ items: [], total: 0 }))
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_list_tasks')!
-    await expect(execute(tool, {})).rejects.toThrow('groupId is required')
+    await expect(execute(tool, {})).rejects.toThrow('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
   })
 
   it('get_active_group returns null when nothing is selected', async () => {
@@ -495,13 +514,13 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(JSON.stringify(result).includes('undefined')).toBe(false)
   })
 
-  it('get_group_members rejects a missing groupId with a clear error', async () => {
-    const client = clientWith(() => Promise.resolve([]))
+  it('get_group_members auto-backfills groupId and throws a clear error when nothing resolves', async () => {
+    const client = clientWith(() => Promise.resolve({ items: [], total: 0 }))
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group_members')!
-    // schema 层必填校验:缺参时报清晰错误而非崩溃。
-    await expect(execute(tool, {})).rejects.toThrow('missing required property "groupId"')
-    // 空字符串兜底:requireGroupId 拒绝空白 groupId。
-    await expect(execute(tool, { groupId: '  ' })).rejects.toThrow('groupId is required')
+    // groupId 可选:未传时走自动回填,回填失败报清晰错误而非崩溃。
+    await expect(execute(tool, {})).rejects.toThrow('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
+    // 空白 groupId 等价于未传,同样走回填并报错。
+    await expect(execute(tool, { groupId: '  ' })).rejects.toThrow('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
   })
 
   it('get_group_members surfaces a clear error when the group does not exist (404)', async () => {
@@ -822,15 +841,44 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     await expect(execute(tool, { groupId: 'g1', taskId: 't1', brief: 'x' })).rejects.toThrow(/无权限修改任务书/)
   })
 
-  it('get_notifications returns and clears the pending queue', async () => {
+  it('get_notifications returns and clears the active group pending queue', async () => {
     notificationQueue.drain() // 清空共享队列,避免用例间串扰
     notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g1' })
     const client = clientWith(() => Promise.resolve([]))
-    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
     const first = (await execute(tool, {})) as Array<{ type: string; groupId: string }>
     expect(first).toEqual([expect.objectContaining({ type: 'task.completed', groupId: 'g1' })])
     const second = (await execute(tool, {})) as unknown[]
     expect(second).toEqual([])
+  })
+
+  it('get_notifications only returns the active group and keeps other groups queued', async () => {
+    notificationQueue.drain() // 清空共享队列,避免用例间串扰
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
+    notificationQueue.enqueue({ type: 'task.failed', groupId: 'g2', taskId: 't2', status: 'failed', time: 't2' })
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g1' })
+    const client = clientWith(() => Promise.resolve([]))
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await execute(tool, {})) as Array<{ groupId: string }>
+    expect(result).toEqual([expect.objectContaining({ groupId: 'g1' })])
+    // 其他群的通知保留在队列里,不丢失。
+    expect(notificationQueue.peek()).toEqual([expect.objectContaining({ groupId: 'g2' })])
+    notificationQueue.drain()
+  })
+
+  it('get_notifications returns nothing and clears nothing when no active group is selected', async () => {
+    notificationQueue.drain() // 清空共享队列,避免用例间串扰
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
+    const client = clientWith(() => Promise.resolve([]))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await execute(tool, {})) as unknown[]
+    expect(result).toEqual([])
+    // 未选群时不 drain,通知保留在队列里。
+    expect(notificationQueue.size).toBe(1)
+    notificationQueue.drain()
   })
 
   it('get_notifications normalizes missing fields to null (no undefined values)', async () => {
@@ -845,8 +893,10 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       summary: '构建失败',
       time: 't2',
     })
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g1' })
     const client = clientWith(() => Promise.resolve([]))
-    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
     const result = (await execute(tool, {})) as Array<Record<string, unknown>>
     expect(result).toEqual([
       { type: 'message.received', groupId: 'g1', taskId: null, status: null, executorName: null, summary: null, time: 't' },

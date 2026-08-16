@@ -81,6 +81,7 @@ type SetupState =
 export function CoAgentHubSettings({ onSaved }: CoAgentHubSettingsProps) {
   const [apiBase, setApiBase] = useState('')
   const [participantId, setParticipantId] = useState('')
+  const [activeGroupId, setActiveGroupId] = useState('')
   const [loadState, setLoadState] = useState<LoadState>({ kind: 'idle' })
   const [saveState, setSaveState] = useState<LoadState>({ kind: 'idle' })
 
@@ -100,6 +101,7 @@ export function CoAgentHubSettings({ onSaved }: CoAgentHubSettingsProps) {
         if (!alive) return
         setApiBase(settings.apiBase ?? '')
         setParticipantId(settings.participantId ?? '')
+        setActiveGroupId(settings.activeGroupId ?? '')
         setLoadState({ kind: 'ready' })
       },
       (error: unknown) => {
@@ -179,6 +181,19 @@ export function CoAgentHubSettings({ onSaved }: CoAgentHubSettingsProps) {
   const workspaces = status?.workspaces ?? []
   const registeredCount = workspaces.filter(workspace => workspace.registered === true).length
 
+  // 只读状态区数据:participantId 来自 fetchSettings();工作区群名由
+  // activeGroupId 在 workspace-status 的群列表里反查(找不到时回退显示 id)。
+  const activeWorkspace = workspaces.find(workspace => workspace.groupId === activeGroupId)
+  const activeGroupTitle = activeGroupId.trim() === ''
+    ? null
+    : activeWorkspace?.groupTitle ?? activeGroupId
+
+  const handleCopyParticipantId = (): void => {
+    const value = participantId.trim()
+    if (value === '') return
+    void navigator.clipboard?.writeText(value).catch(() => {})
+  }
+
   return (
     <section className={css.content} aria-label="CoAgentHub 设置">
       <header className={css.header}>
@@ -216,6 +231,26 @@ export function CoAgentHubSettings({ onSaved }: CoAgentHubSettingsProps) {
           <p className={css.error} role="alert">保存失败:{saveState.message}</p>
         )}
       </form>
+      <section className={css.statusSection} aria-label="当前身份与工作区">
+        <h3 className={css.wsTitle}>当前身份与工作区</h3>
+        <div className={css.statusRow}>
+          <span className={css.label}>当前 participantId</span>
+          <span className={css.statusValue} aria-label="当前 participantId">
+            {participantId.trim() === '' ? '未设置' : participantId}
+          </span>
+          {participantId.trim() !== '' && (
+            <button type="button" className={css.copy} onClick={handleCopyParticipantId} aria-label="复制 participantId">
+              复制
+            </button>
+          )}
+        </div>
+        <div className={css.statusRow}>
+          <span className={css.label}>当前工作区</span>
+          <span className={css.statusValue} aria-label="当前工作区群名">
+            {activeGroupTitle === null ? '未选择' : activeGroupTitle}
+          </span>
+        </div>
+      </section>
       <section className={css.wsSection} aria-label="虚拟工作区">
         <h3 className={css.wsTitle}>虚拟工作区</h3>
         {statusError !== null && <p className={css.wsError}>{statusError}</p>}

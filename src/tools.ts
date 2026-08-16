@@ -83,11 +83,33 @@ function serverErrorMessage(error: CoAgentHubError): string {
   return body
 }
 
-function requireGroupId(groupId: string | undefined): string {
-  if (groupId === undefined || groupId.trim() === '') {
-    throw new Error('groupId is required: pass the group id to scope the query')
+const GROUP_ID_DESCRIPTION =
+  'Target group id. 可选:不传时自动回填(activeGroupId → 当前工作区 cwd 反查)。'
+
+/**
+ * Resolve the group a tool should operate on: an explicit groupId wins, then
+ * the stored activeGroupId, then a cwd-based backfill through the workspace
+ * mapping. Throws a clear error when nothing resolves so the agent passes an
+ * explicit groupId.
+ */
+async function resolveGroupId(
+  args: { groupId?: string },
+  exec: ToolRunContext,
+  client: CoAgentHubClient,
+  settingsStore: CoAgentHubSettingsStore | undefined,
+): Promise<string> {
+  const settings = settingsStore?.get()
+  if (args.groupId !== undefined && args.groupId.trim() !== '') return args.groupId
+  if (settings?.activeGroupId !== undefined && settings.activeGroupId.trim() !== '') return settings.activeGroupId
+  const matched = findGroupByWorkspaceCwd(
+    (await client.listGroups(100)).items,
+    workspaceRootFromExec(exec),
+    settings?.mappingRule,
+  )
+  if (matched === null) {
+    throw new Error('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
   }
-  return groupId
+  return matched.id
 }
 
 /**
@@ -362,8 +384,12 @@ export function createCoAgentHubTools(
       parameters: {},
       output: { schema: { type: 'array', items: PARTICIPANT_VIEW_SCHEMA } as const, render: renderValue },
       async execute() {
-        const participants = await client.listParticipants()
-        return participants.map(participantView)
+        try {
+          const participants = await client.listParticipants()
+          return participants.map(participantView)
+        } catch (error) {
+          throwToolError(error, '参与者列表不可用(404)')
+        }
       },
     }),
 
@@ -375,8 +401,12 @@ export function createCoAgentHubTools(
       },
       output: { schema: GROUP_VIEW_SCHEMA, render: renderValue },
       async execute(args: { title: string }) {
-        const group = await client.createGroup(args.title)
-        return { id: group.id, title: group.title, status: group.status }
+        try {
+          const group = await client.createGroup(args.title)
+          return { id: group.id, title: group.title, status: group.status }
+        } catch (error) {
+          throwToolError(error, '群创建失败(404)')
+        }
       },
     }),
 
@@ -385,7 +415,7 @@ export function createCoAgentHubTools(
       description:
         'Post a message to a CoAgentHub group. Default audience is "broadcast"; use audience "participant" with audienceRef to address one participant.',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
         body: { type: 'string', required: true, description: 'Message body.' },
         audience: {
           type: 'string',
@@ -397,17 +427,22 @@ export function createCoAgentHubTools(
       },
       output: { schema: MESSAGE_VIEW_SCHEMA, render: renderValue },
       async execute(args: {
-        groupId: string
+        groupId?: string
         body: string
         audience?: 'broadcast' | 'role' | 'participant'
         audienceRef?: string
-      }) {
-        const message = await client.postMessage(args.groupId, {
-          body: args.body,
-          audience: args.audience ?? 'broadcast',
-          audienceRef: args.audienceRef,
-        })
-        return messageView(message)
+      }, exec: ToolRunContext) {
+        try {
+          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const message = await client.postMessage(groupId, {
+            body: args.body,
+            audience: args.audience ?? 'broadcast',
+            audienceRef: args.audienceRef,
+          })
+          return messageView(message)
+        } catch (error) {
+          throwToolError(error, '群组不存在(404)')
+        }
       },
     }),
 
@@ -456,23 +491,7 @@ export function createCoAgentHubTools(
         dependencies?: string
       }, exec: ToolRunContext) {
         // groupId 可选:显式传值优先,否则依次用 activeGroupId、当前工作区 cwd 反查。
-        const settings = settingsStore?.get()
-        let groupId: string
-        if (args.groupId !== undefined && args.groupId.trim() !== '') {
-          groupId = args.groupId
-        } else if (settings?.activeGroupId !== undefined && settings.activeGroupId.trim() !== '') {
-          groupId = settings.activeGroupId
-        } else {
-          const matched = findGroupByWorkspaceCwd(
-            (await client.listGroups(100)).items,
-            workspaceRootFromExec(exec),
-            settings?.mappingRule,
-          )
-          if (matched === null) {
-            throw new Error('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
-          }
-          groupId = matched.id
-        }
+        const groupId = await resolveGroupId(args, exec, client, settingsStore)
         const executor = await resolveExecutor(client, args.executorName)
         const taskBook = buildTaskBook({
           body: args.body,
@@ -499,7 +518,7 @@ export function createCoAgentHubTools(
           if (error instanceof CoAgentHubError && error.status === 403) {
             throw new Error('无权限发布任务：需要 coordinator/human 身份')
           }
-          throw error
+          throwToolError(error, '群组不存在(404)')
         }
       },
     }),
@@ -507,25 +526,29 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_list_tasks',
       description:
-        'List tasks of a CoAgentHub group (id, status, executor, summary, timestamps). groupId is required by the API.',
+        'List tasks of a CoAgentHub group (id, status, executor, summary, timestamps).',
       parameters: {
-        groupId: { type: 'string', description: 'Target group id (required by the CoAgentHub API).' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
       },
       output: { schema: { type: 'array', items: TASK_VIEW_SCHEMA } as const, render: renderValue },
-      async execute(args: { groupId?: string }, _exec: ToolRunContext) {
-        const groupId = requireGroupId(args.groupId)
-        const [tasks, participants] = await Promise.all([client.listTasks(groupId), client.listParticipants()])
-        const nameById = new Map(participants.map(participant => [participant.id, participant.name]))
-        return tasks.map(task => ({
-          id: task.id,
-          groupId: task.groupId,
-          status: task.status,
-          executorParticipantId: task.executorParticipantId,
-          executorName: nameById.get(task.executorParticipantId) ?? task.executorParticipantId,
-          summary: summarizeBrief(task.brief),
-          createdAt: task.createdAt,
-          updatedAt: task.updatedAt,
-        }))
+      async execute(args: { groupId?: string }, exec: ToolRunContext) {
+        try {
+          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const [tasks, participants] = await Promise.all([client.listTasks(groupId), client.listParticipants()])
+          const nameById = new Map(participants.map(participant => [participant.id, participant.name]))
+          return tasks.map(task => ({
+            id: task.id,
+            groupId: task.groupId,
+            status: task.status,
+            executorParticipantId: task.executorParticipantId,
+            executorName: nameById.get(task.executorParticipantId) ?? task.executorParticipantId,
+            summary: summarizeBrief(task.brief),
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+          }))
+        } catch (error) {
+          throwToolError(error, '群组不存在(404)')
+        }
       },
     }),
 
@@ -534,19 +557,24 @@ export function createCoAgentHubTools(
       description:
         'List messages of a CoAgentHub group, newest first. Pass `after` (ISO 8601 timestamp) to fetch only messages created after it (incremental sync).',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
         after: { type: 'string', description: 'ISO 8601 timestamp; only messages created after it are returned.' },
       },
       output: { schema: { type: 'array', items: MESSAGE_VIEW_SCHEMA } as const, render: renderValue },
-      async execute(args: { groupId: string; after?: string }) {
-        const messages = await client.listMessages(args.groupId)
-        const afterMs = args.after === undefined ? undefined : Date.parse(args.after)
-        const filtered = afterMs === undefined || Number.isNaN(afterMs)
-          ? messages
-          : messages.filter(message => Date.parse(message.createdAt) > afterMs)
-        return [...filtered]
-          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-          .map(messageView)
+      async execute(args: { groupId?: string; after?: string }, exec: ToolRunContext) {
+        try {
+          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const messages = await client.listMessages(groupId)
+          const afterMs = args.after === undefined ? undefined : Date.parse(args.after)
+          const filtered = afterMs === undefined || Number.isNaN(afterMs)
+            ? messages
+            : messages.filter(message => Date.parse(message.createdAt) > afterMs)
+          return [...filtered]
+            .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+            .map(messageView)
+        } catch (error) {
+          throwToolError(error, '群组不存在(404)')
+        }
       },
     }),
 
@@ -575,22 +603,26 @@ export function createCoAgentHubTools(
         render: renderValue,
       },
       async execute(_args: Record<string, never>, exec: ToolRunContext) {
-        const settings = settingsStore?.get()
-        const activeGroupId = settings?.activeGroupId
-        const cwd = workspaceRootFromExec(exec)
-        const groups = await client.listGroups(100)
-        const group = activeGroupId !== undefined && activeGroupId.trim() !== ''
-          ? groups.items.find(candidate => candidate.id === activeGroupId)
-          : findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule) ?? undefined
-        if (group === undefined) return null
-        const winPath = groupProjectWinPath(group.projectPath, settings?.mappingRule)
-        const instructions = await readWorkspaceInstructions(cwd)
-        return {
-          groupId: group.id,
-          groupTitle: group.title,
-          projectPath: group.projectPath ?? null,
-          winPath,
-          instructions,
+        try {
+          const settings = settingsStore?.get()
+          const activeGroupId = settings?.activeGroupId
+          const cwd = workspaceRootFromExec(exec)
+          const groups = await client.listGroups(100)
+          const group = activeGroupId !== undefined && activeGroupId.trim() !== ''
+            ? groups.items.find(candidate => candidate.id === activeGroupId)
+            : findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule) ?? undefined
+          if (group === undefined) return null
+          const winPath = groupProjectWinPath(group.projectPath, settings?.mappingRule)
+          const instructions = await readWorkspaceInstructions(cwd)
+          return {
+            groupId: group.id,
+            groupTitle: group.title,
+            projectPath: group.projectPath ?? null,
+            winPath,
+            instructions,
+          }
+        } catch (error) {
+          throwToolError(error, '当前工作区不可用(404)')
         }
       },
     }),
@@ -613,21 +645,25 @@ export function createCoAgentHubTools(
         render: renderValue,
       },
       async execute(_args: Record<string, never>, exec: ToolRunContext) {
-        const settings = settingsStore?.get()
-        const activeGroupId = settings?.activeGroupId
-        const cwd = workspaceRootFromExec(exec)
-        let groupId: string | null = null
-        let groupTitle: string | null = null
-        const groups = await client.listGroups(100)
-        const group = activeGroupId !== undefined && activeGroupId.trim() !== ''
-          ? groups.items.find(candidate => candidate.id === activeGroupId)
-          : findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule) ?? undefined
-        if (group !== undefined) {
-          groupId = group.id
-          groupTitle = group.title
+        try {
+          const settings = settingsStore?.get()
+          const activeGroupId = settings?.activeGroupId
+          const cwd = workspaceRootFromExec(exec)
+          let groupId: string | null = null
+          let groupTitle: string | null = null
+          const groups = await client.listGroups(100)
+          const group = activeGroupId !== undefined && activeGroupId.trim() !== ''
+            ? groups.items.find(candidate => candidate.id === activeGroupId)
+            : findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule) ?? undefined
+          if (group !== undefined) {
+            groupId = group.id
+            groupTitle = group.title
+          }
+          const instructions = await readWorkspaceInstructions(cwd)
+          return { groupId, groupTitle, instructions }
+        } catch (error) {
+          throwToolError(error, '工作区指令不可用(404)')
         }
-        const instructions = await readWorkspaceInstructions(cwd)
-        return { groupId, groupTitle, instructions }
       },
     }),
 
@@ -641,21 +677,25 @@ export function createCoAgentHubTools(
       },
       output: { schema: { type: 'array', items: GROUP_LIST_VIEW_SCHEMA } as const, render: renderValue },
       async execute(args: { limit?: number; status?: 'active' | 'archived' }) {
-        const limit = args.limit ?? 100
-        // 带 status 过滤时先取全量再过滤、后按 limit 截断,避免服务端 limit
-        // 作用在未过滤列表上导致符合条件的群被漏掉。
-        const { items } = args.status === undefined
-          ? await client.listGroups(limit)
-          : await client.listGroups()
-        const filtered = args.status === undefined
-          ? items
-          : items.filter(group => group.status === args.status).slice(0, limit)
-        return filtered.map(group => ({
-          id: group.id,
-          title: group.title,
-          status: group.status,
-          projectPath: group.projectPath ?? null,
-        }))
+        try {
+          const limit = args.limit ?? 100
+          // 带 status 过滤时先取全量再过滤、后按 limit 截断,避免服务端 limit
+          // 作用在未过滤列表上导致符合条件的群被漏掉。
+          const { items } = args.status === undefined
+            ? await client.listGroups(limit)
+            : await client.listGroups()
+          const filtered = args.status === undefined
+            ? items
+            : items.filter(group => group.status === args.status).slice(0, limit)
+          return filtered.map(group => ({
+            id: group.id,
+            title: group.title,
+            status: group.status,
+            projectPath: group.projectPath ?? null,
+          }))
+        } catch (error) {
+          throwToolError(error, '群列表不可用(404)')
+        }
       },
     }),
 
@@ -664,23 +704,28 @@ export function createCoAgentHubTools(
       description:
         'Fetch one CoAgentHub group by id (id, title, status, projectPath, members).',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
       },
       output: { schema: GROUP_DETAIL_VIEW_SCHEMA, render: renderValue },
-      async execute(args: { groupId: string }) {
-        const group = await client.getGroup(args.groupId)
-        // members 归一化:每项 { id, name, device },缺失字段补 null,
-        // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
-        return {
-          id: group.id,
-          title: group.title,
-          status: group.status,
-          projectPath: group.projectPath ?? null,
-          members: (group.members ?? []).map(member => ({
-            id: member.id,
-            name: member.name,
-            device: member.device ?? null,
-          })),
+      async execute(args: { groupId?: string }, exec: ToolRunContext) {
+        try {
+          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const group = await client.getGroup(groupId)
+          // members 归一化:每项 { id, name, device },缺失字段补 null,
+          // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
+          return {
+            id: group.id,
+            title: group.title,
+            status: group.status,
+            projectPath: group.projectPath ?? null,
+            members: (group.members ?? []).map(member => ({
+              id: member.id,
+              name: member.name,
+              device: member.device ?? null,
+            })),
+          }
+        } catch (error) {
+          throwToolError(error, '群组不存在(404)')
         }
       },
     }),
@@ -690,11 +735,11 @@ export function createCoAgentHubTools(
       description:
         'List members of a CoAgentHub group with their roles and 分工 prompt (participantId, name, device, roles, prompt, joinedAt). Useful to read who is in a group and what each member is assigned to do.',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
       },
       output: { schema: { type: 'array', items: GROUP_MEMBER_VIEW_SCHEMA } as const, render: renderValue },
-      async execute(args: { groupId?: string }) {
-        const groupId = requireGroupId(args.groupId)
+      async execute(args: { groupId?: string }, exec: ToolRunContext) {
+        const groupId = await resolveGroupId(args, exec, client, settingsStore)
         try {
           const members = await client.getGroupMembers(groupId)
           // 归一化:缺失的 device/prompt/joinedAt 补 null、roles 兜底为数组,
@@ -708,22 +753,8 @@ export function createCoAgentHubTools(
             joinedAt: member.joinedAt ?? null,
           }))
         } catch (error) {
-          if (error instanceof CoAgentHubError) {
-            if (error.status === 404) {
-              // 404 可能表示群不存在,也可能表示服务端未实现该成员接口,两者都给出清晰提示。
-              throw new Error('群组不存在或成员接口不可用(404)')
-            }
-            const reason = serverErrorMessage(error)
-            throw new Error(
-              reason === ''
-                ? `CoAgentHub API 错误(${error.status})`
-                : `CoAgentHub API 错误(${error.status}): ${reason}`,
-            )
-          }
-          if (error instanceof CoAgentHubFetchError) {
-            throw new Error(`无法连接 CoAgentHub 服务: ${error.message}`)
-          }
-          throw error
+          // 404 可能表示群不存在,也可能表示服务端未实现该成员接口,两者都给出清晰提示。
+          throwToolError(error, '群组不存在或成员接口不可用(404)')
         }
       },
     }),
@@ -731,9 +762,9 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_update_group',
       description:
-        'Update a CoAgentHub group: change its title and/or its project binding (projectPath). Pass projectPath as an empty string to clear the binding, or as a non-empty path to set it. groupId is required, and at least one of title / projectPath must be provided.',
+        'Update a CoAgentHub group: change its title and/or its project binding (projectPath). Pass projectPath as an empty string to clear the binding, or as a non-empty path to set it. groupId 可选(自动回填),至少 title / projectPath 传一个。',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
         title: { type: 'string', description: 'New group title.' },
         projectPath: {
           type: 'string',
@@ -741,10 +772,11 @@ export function createCoAgentHubTools(
         },
       },
       output: { schema: GROUP_UPDATE_VIEW_SCHEMA, render: renderValue },
-      async execute(args: { groupId: string; title?: string; projectPath?: string }) {
+      async execute(args: { groupId?: string; title?: string; projectPath?: string }, exec: ToolRunContext) {
         if (args.title === undefined && args.projectPath === undefined) {
           throw new Error('title 和 projectPath 至少传一个:请提供要修改的字段')
         }
+        const groupId = await resolveGroupId(args, exec, client, settingsStore)
         const patch: { title?: string; projectPath?: string | null } = {}
         if (args.title !== undefined) patch.title = args.title
         if (args.projectPath !== undefined) {
@@ -752,7 +784,7 @@ export function createCoAgentHubTools(
           patch.projectPath = path === '' ? null : path
         }
         try {
-          const group = await client.updateGroup(args.groupId, patch)
+          const group = await client.updateGroup(groupId, patch)
           return {
             id: group.id,
             title: group.title,
@@ -770,7 +802,7 @@ export function createCoAgentHubTools(
       description:
         'Add a member to a CoAgentHub group with optional roles (default ["executor"]) and return the server member row (participantId, name, device, roles, prompt, joinedAt).',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
         participantId: { type: 'string', required: true, description: 'Participant id of the member to add.' },
         roles: {
           type: 'array',
@@ -780,9 +812,10 @@ export function createCoAgentHubTools(
         },
       },
       output: { schema: GROUP_MEMBER_VIEW_SCHEMA, render: renderValue },
-      async execute(args: { groupId: string; participantId: string; roles?: string[] }) {
+      async execute(args: { groupId?: string; participantId: string; roles?: string[] }, exec: ToolRunContext) {
         try {
-          const member = await client.addGroupMember(args.groupId, {
+          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const member = await client.addGroupMember(groupId, {
             participantId: args.participantId,
             roles: args.roles === undefined ? ['executor'] : args.roles,
           })
@@ -807,13 +840,14 @@ export function createCoAgentHubTools(
       description:
         'Remove a member from a CoAgentHub group by participant id. Returns { ok: true } on success; a missing member or group yields a clear 404 error.',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
         participantId: { type: 'string', required: true, description: 'Participant id of the member to remove.' },
       },
       output: { schema: REMOVE_MEMBER_VIEW_SCHEMA, render: renderValue },
-      async execute(args: { groupId: string; participantId: string }) {
+      async execute(args: { groupId?: string; participantId: string }, exec: ToolRunContext) {
         try {
-          await client.removeGroupMember(args.groupId, args.participantId)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          await client.removeGroupMember(groupId, args.participantId)
           return { ok: true }
         } catch (error) {
           throwToolError(error, '成员或群组不存在(404):请检查 participantId 与 groupId')
@@ -828,17 +862,21 @@ export function createCoAgentHubTools(
       parameters: {},
       output: { schema: { type: 'array', items: EXECUTOR_VIEW_SCHEMA } as const, render: renderValue },
       async execute() {
-        const executors = await client.listExecutors()
-        return executors.map(executor => ({
-          key: executor.key,
-          agentName: executor.agentName,
-          kind: executor.kind ?? null,
-          bin: executor.bin ?? null,
-          url: executor.url ?? null,
-          model: executor.model ?? null,
-          device: executor.device ?? null,
-          online: executor.online ?? null,
-        }))
+        try {
+          const executors = await client.listExecutors()
+          return executors.map(executor => ({
+            key: executor.key,
+            agentName: executor.agentName,
+            kind: executor.kind ?? null,
+            bin: executor.bin ?? null,
+            url: executor.url ?? null,
+            model: executor.model ?? null,
+            device: executor.device ?? null,
+            online: executor.online ?? null,
+          }))
+        } catch (error) {
+          throwToolError(error, '执行器列表不可用(404)')
+        }
       },
     }),
 
@@ -847,45 +885,50 @@ export function createCoAgentHubTools(
       description:
         'Fetch one task of a CoAgentHub group (id, status, executor, brief, retryCount, attempts, diffSummary, outputTail). Prefers the single-task endpoint and falls back to listing tasks.',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
         taskId: { type: 'string', required: true, description: 'Task id.' },
       },
       output: { schema: TASK_DETAIL_VIEW_SCHEMA, render: renderValue },
-      async execute(args: { groupId: string; taskId: string }) {
-        const [task, participants] = await Promise.all([
-          client.getTask(args.groupId, args.taskId),
-          client.listParticipants(),
-        ])
-        const nameById = new Map(participants.map(participant => [participant.id, participant.name]))
-        // 归一化后再返回:attempts 各项的 error/summary/hash 缺省时补 null
-        // (schema 中 required: true,字段缺失会违反;值为 null 则不违反),
-        // diffSummary 只保留 schema 声明的字段(outputTail 提到顶层)。
-        return {
-          id: task.id,
-          status: task.status,
-          executorParticipantId: task.executorParticipantId,
-          executorName: nameById.get(task.executorParticipantId) ?? task.executorParticipantId,
-          brief: task.brief,
-          createdAt: task.createdAt,
-          updatedAt: task.updatedAt,
-          retryCount: task.retryCount,
-          attempts: (task.attempts ?? []).map(attempt => ({
-            n: attempt.n,
-            startedAt: attempt.startedAt,
-            endedAt: attempt.endedAt ?? null,
-            status: attempt.status,
-            error: attempt.error ?? null,
-            summary: attempt.summary ?? null,
-            hash: attempt.hash ?? null,
-          })),
-          diffSummary: task.diffSummary === null || task.diffSummary === undefined
-            ? null
-            : {
-                summary: task.diffSummary.summary ?? null,
-                hash: task.diffSummary.hash ?? null,
-                error: task.diffSummary.error ?? null,
-              },
-          outputTail: task.diffSummary?.outputTail ?? null,
+      async execute(args: { groupId?: string; taskId: string }, exec: ToolRunContext) {
+        try {
+          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const [task, participants] = await Promise.all([
+            client.getTask(groupId, args.taskId),
+            client.listParticipants(),
+          ])
+          const nameById = new Map(participants.map(participant => [participant.id, participant.name]))
+          // 归一化后再返回:attempts 各项的 error/summary/hash 缺省时补 null
+          // (schema 中 required: true,字段缺失会违反;值为 null 则不违反),
+          // diffSummary 只保留 schema 声明的字段(outputTail 提到顶层)。
+          return {
+            id: task.id,
+            status: task.status,
+            executorParticipantId: task.executorParticipantId,
+            executorName: nameById.get(task.executorParticipantId) ?? task.executorParticipantId,
+            brief: task.brief,
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+            retryCount: task.retryCount,
+            attempts: (task.attempts ?? []).map(attempt => ({
+              n: attempt.n,
+              startedAt: attempt.startedAt,
+              endedAt: attempt.endedAt ?? null,
+              status: attempt.status,
+              error: attempt.error ?? null,
+              summary: attempt.summary ?? null,
+              hash: attempt.hash ?? null,
+            })),
+            diffSummary: task.diffSummary === null || task.diffSummary === undefined
+              ? null
+              : {
+                  summary: task.diffSummary.summary ?? null,
+                  hash: task.diffSummary.hash ?? null,
+                  error: task.diffSummary.error ?? null,
+                },
+            outputTail: task.diffSummary?.outputTail ?? null,
+          }
+        } catch (error) {
+          throwToolError(error, '任务或群组不存在(404)')
         }
       },
     }),
@@ -895,15 +938,16 @@ export function createCoAgentHubTools(
       description:
         'Update a CoAgentHub task brief before the task starts executing (PATCH). The server rejects with 409 when the task is no longer in a modifiable (queued) state and with 403 when the caller lacks permission.',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: GROUP_ID_DESCRIPTION },
         taskId: { type: 'string', required: true, description: 'Task id.' },
         brief: { type: 'string', required: true, description: 'The new full task brief, replacing the previous one.' },
       },
       output: { schema: TASK_UPDATE_VIEW_SCHEMA, render: renderValue },
-      async execute(args: { groupId: string; taskId: string; brief: string }) {
+      async execute(args: { groupId?: string; taskId: string; brief: string }, exec: ToolRunContext) {
         try {
+          const groupId = await resolveGroupId(args, exec, client, settingsStore)
           const [task, participants] = await Promise.all([
-            client.updateTaskBrief(args.groupId, args.taskId, args.brief),
+            client.updateTaskBrief(groupId, args.taskId, args.brief),
             client.listParticipants(),
           ])
           const nameById = new Map(participants.map(participant => [participant.id, participant.name]))
@@ -928,7 +972,7 @@ export function createCoAgentHubTools(
               throw new Error(reason === '' ? '无权限修改任务书(403):需要协调者权限' : `无权限修改任务书(403): ${reason}`)
             }
           }
-          throw error
+          throwToolError(error, '任务或群组不存在(404)')
         }
       },
     }),
@@ -936,13 +980,20 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_get_notifications',
       description:
-        'Return and clear the pending CoAgentHub notifications (task completed / failed / stalled / status changed / new message). Use to catch up on background events instead of polling.',
+        'Return and clear the pending CoAgentHub notifications for the current active group only (task completed / failed / stalled / status changed / new message). Notifications from other groups stay queued and do not leak into the current workspace. Use to catch up on background events instead of polling.',
       parameters: {},
       output: { schema: { type: 'array', items: NOTIFICATION_VIEW_SCHEMA } as const, render: renderValue },
       async execute() {
+        // 通知按当前 active group 隔离:只 drain 当前群的队列条目,其他群的通知
+        // 保留在队列里(drainByGroup),既不会串到当前会话也不会丢失。
+        const settings = settingsStore?.get()
+        const activeGroupId = settings?.activeGroupId
+        const pending = activeGroupId !== undefined && activeGroupId.trim() !== ''
+          ? notificationQueue.drainByGroup(activeGroupId)
+          : []
         // 归一化:drain() 结果中缺省的 taskId/status/executorName/summary 补 null,
         // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
-        return notificationQueue.drain().map(notification => ({
+        return pending.map(notification => ({
           type: notification.type,
           groupId: notification.groupId,
           taskId: notification.taskId ?? null,

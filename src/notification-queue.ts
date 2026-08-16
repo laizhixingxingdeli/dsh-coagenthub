@@ -57,6 +57,22 @@ export class NotificationQueue {
     return pending
   }
 
+  /**
+   * Return pending notifications for one group and remove only those; other
+   * groups' notifications stay queued in place (通知按当前工作区隔离,不同群的
+   * 事件不会串到当前会话,也不会因 drain 而丢失)。
+   */
+  drainByGroup(groupId: string): CoAgentHubNotification[] {
+    const matched: CoAgentHubNotification[] = []
+    const kept: CoAgentHubNotification[] = []
+    for (const item of this.items) {
+      if (item.groupId === groupId) matched.push(item)
+      else kept.push(item)
+    }
+    this.items = kept
+    return matched
+  }
+
   /** Read without clearing (用于补读/调试)。 */
   peek(): CoAgentHubNotification[] {
     return [...this.items]

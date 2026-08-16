@@ -107,6 +107,60 @@ describe('CoAgentHubSettings helpers', () => {
   })
 })
 
+describe('CoAgentHubSettings 当前身份与工作区 status area', () => {
+  function statusAreaFetchMock(settings: Record<string, unknown>) {
+    return vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({ mappingRule: null, workspaces: [] }))
+      }
+      return Promise.resolve(jsonResponse(settings))
+    })
+  }
+
+  it('shows the participantId and a copy button when set', async () => {
+    vi.stubGlobal('fetch', statusAreaFetchMock({ participantId: 'p-1' }))
+
+    render(<CoAgentHubSettings />)
+
+    expect((await screen.findByLabelText('当前 participantId')).textContent).toContain('p-1')
+    expect(screen.getByRole('button', { name: '复制 participantId' })).toBeTruthy()
+  })
+
+  it('shows 未设置 when participantId is absent', async () => {
+    vi.stubGlobal('fetch', statusAreaFetchMock({}))
+
+    render(<CoAgentHubSettings />)
+
+    expect((await screen.findByLabelText('当前 participantId')).textContent).toContain('未设置')
+    expect(screen.queryByRole('button', { name: '复制 participantId' })).toBeNull()
+  })
+
+  it('shows the active group title when activeGroupId is set', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/workspace-status')) {
+        return Promise.resolve(jsonResponse({
+          mappingRule: null,
+          workspaces: [{ groupId: 'g1', groupTitle: 'dsh-coagenthub 插件开发' }],
+        }))
+      }
+      return Promise.resolve(jsonResponse({ participantId: 'p-1', activeGroupId: 'g1' }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubSettings />)
+
+    expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('dsh-coagenthub 插件开发')
+  })
+
+  it('shows 未选择 when no active group is selected', async () => {
+    vi.stubGlobal('fetch', statusAreaFetchMock({}))
+
+    render(<CoAgentHubSettings />)
+
+    expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('未选择')
+  })
+})
+
 describe('CoAgentHubSettings 虚拟工作区 section', () => {
   it('shows the mapping rule and the registered count', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
