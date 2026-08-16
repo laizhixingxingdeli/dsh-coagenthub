@@ -104,17 +104,25 @@ export function normalizeWinPrefix(prefix: string): string {
 }
 
 /**
- * Map a Mac path through the rule into a Windows path (`/` → `\`). Returns
- * null when the path lies outside the mapped prefix.
+ * Re-root a Mac path under `macPrefix` onto an already-normalized Windows
+ * root (`Z:\` or `\\server\share\`). Returns null when the path lies outside
+ * the mapped prefix.
  */
-export function projectToWinPath(macPath: string, macPrefix: string, winPrefix: string): string | null {
+function mapToWinPath(macPath: string, macPrefix: string, winRoot: string): string | null {
   const path = macPath.trim().replace(/\/+$/, '')
   const prefix = macPrefix.trim().replace(/\/+$/, '')
   if (path !== prefix && !path.startsWith(`${prefix}/`)) return null
-  const root = normalizeWinPrefix(winPrefix)
   const relative = path === prefix ? '' : path.slice(prefix.length + 1)
-  if (relative === '') return root
-  return root + relative.replaceAll('/', '\\')
+  if (relative === '') return winRoot
+  return winRoot + relative.replaceAll('/', '\\')
+}
+
+/**
+ * Map a Mac path through the rule into a Windows drive-letter path
+ * (`/` → `\`). Returns null when the path lies outside the mapped prefix.
+ */
+export function projectToWinPath(macPath: string, macPrefix: string, winPrefix: string): string | null {
+  return mapToWinPath(macPath, macPrefix, normalizeWinPrefix(winPrefix))
 }
 
 /**
@@ -134,6 +142,66 @@ export function normalizeWindowsPath(path: string): string {
 /** Windows path equality: case-insensitive, `/` ≡ `\`, trailing separators ignored. */
 export function sameWindowsPath(left: string, right: string): boolean {
   return normalizeWindowsPath(left) === normalizeWindowsPath(right)
+}
+
+/** Parsed UNC path: `\\server\share\relative...` (relative uses `\`). */
+export interface UncPathParts {
+  server: string
+  share: string
+  /** Remainder after the share, `\`-separated; empty when the path is exactly `\\server\share`. */
+  relative: string
+}
+
+/**
+ * Parse a Windows UNC path into server/share/relative parts. Accepts both
+ * `\\server\share\...` and `//server/share/...`; null when the path is not a
+ * UNC path with both a server and a share (drive-letter and POSIX paths, or a
+ * bare `\\server`).
+ */
+export function parseUncPath(path: string): UncPathParts | null {
+  const normalized = path.trim().replaceAll('\\', '/').replace(/\/+$/, '')
+  if (!normalized.startsWith('//')) return null
+  const rest = normalized.slice(2)
+  const firstSlash = rest.indexOf('/')
+  if (firstSlash === -1) return null
+  const server = rest.slice(0, firstSlash)
+  const remainder = rest.slice(firstSlash + 1)
+  const secondSlash = remainder.indexOf('/')
+  const share = secondSlash === -1 ? remainder : remainder.slice(0, secondSlash)
+  if (server === '' || share === '') return null
+  const relative = secondSlash === -1 ? '' : remainder.slice(secondSlash + 1).replaceAll('/', '\\')
+  return { server, share, relative }
+}
+
+/**
+ * Matching forms of one workspace path for registration checks: the path
+ * itself, plus — when it is a UNC path and a winPrefix is available — its
+ * drive-letter re-root (`\\server\share\a\b` → `Z:\a\b`), because the UNC
+ * share maps 1:1 onto the mapped drive. All forms are normalized for
+ * comparison (case-insensitive, `/` ≡ `\`, trailing separators dropped).
+ */
+function workspacePathForms(path: string, winPrefix: string | undefined): string[] {
+  const forms = [normalizeWindowsPath(path)]
+  if (winPrefix !== undefined) {
+    const unc = parseUncPath(path)
+    if (unc !== null) {
+      forms.push(normalizeWindowsPath(normalizeWinPrefix(winPrefix) + unc.relative))
+    }
+  }
+  return forms
+}
+
+/**
+ * Whether two workspace paths refer to the same location across drive-letter
+ * and UNC representations (`Z:\a\b` ≡ `\\server\share\a\b` ≡
+ * `//server/share/a/b`). When `winPrefix` is given, UNC paths are re-rooted
+ * onto the drive so the two formats compare equal; without it, only the
+ * same-form comparison applies.
+ */
+export function sameWorkspacePath(left: string, right: string, winPrefix?: string): boolean {
+  const leftForms = workspacePathForms(left, winPrefix)
+  const rightForms = new Set(workspacePathForms(right, winPrefix))
+  return leftForms.some(leftForm => rightForms.has(leftForm))
 }
 
 /**
@@ -159,7 +227,9 @@ export function groupProjectWinPath(
  * possible, else its own Windows local absolute path — matches the session
  * cwd as a Windows path; when the cwd is itself a Mac/POSIX path, compare it
  * directly against each group's projectPath (normalized, trailing separators
- * ignored). Groups without a usable projectPath are skipped; null when
+ * ignored); when the cwd is a UNC path (`\\server\share\...`), re-root each
+ * group's macPrefix-relative path onto the cwd's `server\share` and match
+ * that candidate. Groups without a usable projectPath are skipped; null when
  * nothing matches.
  */
 export function findGroupByWorkspaceCwd(
@@ -169,6 +239,7 @@ export function findGroupByWorkspaceCwd(
 ): GroupWithPath | null {
   if (cwd === null || cwd === undefined || cwd.trim() === '') return null
   const posixCwd = isPosixLocalPath(cwd) ? normalizePosixPath(cwd) : null
+  const unc = isWindowsLocalPath(cwd) ? parseUncPath(cwd) : null
   for (const group of groups) {
     const winPath = groupProjectWinPath(group.projectPath, mappingRule)
     if (winPath !== null && sameWindowsPath(winPath, cwd)) return group
@@ -178,6 +249,17 @@ export function findGroupByWorkspaceCwd(
       && group.projectPath !== null && group.projectPath !== undefined
       && normalizePosixPath(group.projectPath) === posixCwd
     ) return group
+    // UNC 会话路径:以 cwd 的 server/share 为根、按 macPrefix 的剩余段重根每个群,
+    // 构造 \\server\share\... 候选(与盘符候选同构)并匹配。
+    if (
+      unc !== null
+      && mappingRule !== undefined
+      && group.projectPath !== null && group.projectPath !== undefined
+    ) {
+      const uncRoot = normalizeWinPrefix(`\\\\${unc.server}\\${unc.share}`)
+      const candidate = mapToWinPath(group.projectPath, mappingRule.macPrefix, uncRoot)
+      if (candidate !== null && sameWindowsPath(candidate, cwd)) return group
+    }
   }
   return null
 }
@@ -249,11 +331,6 @@ export const defaultPathExists: PathExists = async winPath => {
   }
 }
 
-/** Case-insensitive path comparison (Windows paths are case-insensitive). */
-function samePath(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase()
-}
-
 export interface WorkspaceRouteDeps {
   /** Effective platform (`process.platform`); non-win32 is rejected. */
   getPlatform(): string
@@ -301,8 +378,11 @@ function projectGroups(groups: GroupWithPath[]): GroupWithPath[] {
  * One-click setup: map the network drive, infer + persist the mapping rule,
  * then register every group whose mapped path exists in the dsh workspace
  * registry (name = group title; existing registrations get their title
- * updated instead of being duplicated). Throws {@link WorkspaceSetupError}
- * on fatal conditions; per-group problems land in `failures`.
+ * updated instead of being duplicated). Existing lookups accept both the
+ * drive-letter form and the UNC form (`\\server\share\...`) of a workspace
+ * path, so a registry entry stored as UNC is not re-created under `Z:\`.
+ * Throws {@link WorkspaceSetupError} on fatal conditions; per-group problems
+ * land in `failures`.
  */
 export async function runWorkspaceSetup(
   input: WorkspaceSetupInput,
@@ -366,7 +446,7 @@ export async function runWorkspaceSetup(
       failures.push({ groupTitle: group.title, winPath, reason: '路径不存在或不可访问' })
       continue
     }
-    const existing = registry.list().find(workspace => samePath(workspace.path, winPath))
+    const existing = registry.list().find(workspace => sameWorkspacePath(workspace.path, winPath, mappingRule.winPrefix))
     try {
       if (existing !== undefined) {
         await existing.setTitle?.(group.title)
@@ -404,14 +484,20 @@ export interface WorkspaceStatusView {
 /**
  * Read-only status: the persisted mapping rule plus, per bound group, the
  * mapped winPath, whether it exists on this host, and whether the dsh
- * registry already knows it (`null` when the registry is unavailable).
+ * registry already knows it (`null` when the registry is unavailable). A
+ * registry entry stored as a UNC path (`\\server\share\...`) counts as
+ * registered against the mapped drive-letter winPath.
  */
 export async function buildWorkspaceStatus(deps: WorkspaceRouteDeps): Promise<WorkspaceStatusView> {
   const mappingRule = deps.store.get().mappingRule ?? null
   const registry = deps.getRegistry()
-  const registeredPaths = new Set(
-    registry === null ? [] : registry.list().map(workspace => workspace.path.toLowerCase()),
-  )
+  const winPrefix = mappingRule?.winPrefix
+  const registeredPaths = new Set<string>()
+  if (registry !== null) {
+    for (const workspace of registry.list()) {
+      for (const form of workspacePathForms(workspace.path, winPrefix)) registeredPaths.add(form)
+    }
+  }
   let groups: GroupWithPath[] = []
   try {
     groups = await deps.listGroups()
@@ -427,7 +513,7 @@ export async function buildWorkspaceStatus(deps: WorkspaceRouteDeps): Promise<Wo
     const pathExists = winPath === null ? false : await deps.pathExists(winPath)
     const registered = winPath === null || registry === null
       ? null
-      : registeredPaths.has(winPath.toLowerCase())
+      : workspacePathForms(winPath, winPrefix).some(form => registeredPaths.has(form))
     workspaces.push({ groupId: group.id, groupTitle: group.title, macPath, winPath, pathExists, registered })
   }
   return { mappingRule, workspaces }

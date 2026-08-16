@@ -9,9 +9,11 @@ import {
   groupProjectWinPath,
   inferMacPrefix,
   isWindowsLocalPath,
+  parseUncPath,
   projectToWinPath,
   runWorkspaceSetup,
   sameWindowsPath,
+  sameWorkspacePath,
   WorkspaceSetupError,
   type GroupWithPath,
   type PathExists,
@@ -151,6 +153,32 @@ describe('runWorkspaceSetup', () => {
     expect(result.failures).toEqual([])
   })
 
+  it('is idempotent against a UNC-registered workspace: title-updated, not re-created under the drive letter', async () => {
+    const setTitle = vi.fn().mockResolvedValue(undefined)
+    const existing = {
+      id: 'w1',
+      path: '\\\\192.168.31.92\\Projects\\dsh-coagenthub',
+      title: '旧标题',
+      setTitle,
+    }
+    const registry: WorkspaceRegistryLike = {
+      create: vi.fn(),
+      list: vi.fn().mockReturnValue([existing]),
+    }
+    const deps = makeDeps({ registry })
+    const result = await runWorkspaceSetup({ shareName: 'Projects' }, deps)
+
+    // dsh-coagenthub 已在 registry 中以 UNC 形式注册:只更新标题,不重复创建。
+    expect(registry.create).toHaveBeenCalledTimes(1)
+    expect(registry.create).toHaveBeenCalledWith('Z:\\deepseek-harness', 'dsh 实测-0814')
+    expect(setTitle).toHaveBeenCalledWith('dsh-coagenthub 插件开发')
+    expect(result.mapped).toEqual([
+      { groupTitle: 'dsh-coagenthub 插件开发', winPath: 'Z:\\dsh-coagenthub', registered: true },
+      { groupTitle: 'dsh 实测-0814', winPath: 'Z:\\deepseek-harness', registered: true },
+    ])
+    expect(result.failures).toEqual([])
+  })
+
   it('skips groups whose winPath does not exist and lists them as failures', async () => {
     const deps = makeDeps({ pathExists: async () => false })
     const result = await runWorkspaceSetup({ shareName: 'Projects' }, deps)
@@ -245,6 +273,34 @@ describe('buildWorkspaceStatus', () => {
     ])
   })
 
+  it('reports registered=true when the registry stores workspaces as UNC paths', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' } })
+    const registry: WorkspaceRegistryLike = {
+      create: vi.fn(),
+      list: vi.fn().mockReturnValue([
+        { id: 'w1', path: '\\\\192.168.31.92\\Projects\\dsh-coagenthub', title: 'dsh-coagenthub 插件开发' },
+        { id: 'w2', path: '\\\\192.168.31.92\\Projects\\deepseek-harness', title: 'dsh 实测-0814' },
+      ]),
+    }
+    const deps: WorkspaceRouteDeps = {
+      getPlatform: () => 'win32',
+      getApiBase: () => 'http://192.168.31.92:3001/api',
+      runNetUse: vi.fn(),
+      pathExists: async () => true,
+      getRegistry: () => registry,
+      store,
+      listGroups: async () => BOUND_GROUPS,
+    }
+    const status = await buildWorkspaceStatus(deps)
+    // UNC 注册项等价于其盘符重根后的路径:两个群都应显示已注册(不再 0/3 误报)。
+    expect(status.workspaces.map(workspace => workspace.registered)).toEqual([true, true])
+    expect(status.workspaces.map(workspace => workspace.winPath)).toEqual([
+      'Z:\\dsh-coagenthub',
+      'Z:\\deepseek-harness',
+    ])
+  })
+
   it('degrades to empty workspaces when no rule is configured', async () => {
     const deps = makeDeps()
     const status = await buildWorkspaceStatus(deps)
@@ -271,6 +327,36 @@ describe('workspace cwd lookup pure functions', () => {
     expect(isWindowsLocalPath('/Users/apple/x')).toBe(false)
     expect(isWindowsLocalPath('projects\\x')).toBe(false)
     expect(isWindowsLocalPath('')).toBe(false)
+  })
+
+  it('parseUncPath extracts server/share/relative for backslash and forward-slash UNC paths', () => {
+    expect(parseUncPath('\\\\192.168.31.92\\Projects\\dsh-coagenthub')).toEqual({
+      server: '192.168.31.92',
+      share: 'Projects',
+      relative: 'dsh-coagenthub',
+    })
+    expect(parseUncPath('//192.168.31.92/Projects/dsh-coagenthub/')).toEqual({
+      server: '192.168.31.92',
+      share: 'Projects',
+      relative: 'dsh-coagenthub',
+    })
+    expect(parseUncPath('\\\\192.168.31.92\\Projects')).toEqual({
+      server: '192.168.31.92',
+      share: 'Projects',
+      relative: '',
+    })
+    expect(parseUncPath('Z:\\dsh-coagenthub')).toBeNull()
+    expect(parseUncPath('/Users/apple/x')).toBeNull()
+    expect(parseUncPath('\\\\server')).toBeNull()
+  })
+
+  it('sameWorkspacePath equates drive-letter and UNC forms of the same relative path', () => {
+    expect(sameWorkspacePath('Z:\\dsh-coagenthub', '\\\\192.168.31.92\\Projects\\dsh-coagenthub', 'Z:\\')).toBe(true)
+    expect(sameWorkspacePath('//192.168.31.92/Projects/dsh-coagenthub', 'z:\\dsh-coagenthub', 'Z:\\')).toBe(true)
+    expect(sameWorkspacePath('Z:\\dsh-coagenthub', '\\\\192.168.31.92\\Projects\\deepseek-harness', 'Z:\\')).toBe(false)
+    // 未提供 winPrefix 时不做盘符↔UNC 换算,只比较同形路径。
+    expect(sameWorkspacePath('Z:\\dsh-coagenthub', '\\\\192.168.31.92\\Projects\\dsh-coagenthub')).toBe(false)
+    expect(sameWorkspacePath('Z:\\a\\b', 'z:\\a\\b\\')).toBe(true)
   })
 
   it('groupProjectWinPath maps via the rule, keeps native Windows paths, else null', () => {
@@ -306,5 +392,21 @@ describe('workspace cwd lookup pure functions', () => {
     expect(findGroupByWorkspaceCwd(groups, '/Users/apple/Desktop/Projects/nope', rule)).toBeNull()
     // Windows 路径仍走原逻辑,不被 POSIX 分支误判。
     expect(findGroupByWorkspaceCwd(groups, 'Y:\\dsh-coagenthub', rule)?.id).toBe('g1')
+  })
+
+  it('findGroupByWorkspaceCwd matches a UNC cwd by re-rooting each group through server/share + macPrefix', () => {
+    const rule = { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' }
+    const groups: GroupWithPath[] = [
+      { id: 'g1', title: 'dsh-coagenthub 插件开发', projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub' },
+      { id: 'g2', title: 'readinghelper', projectPath: '/Users/apple/Desktop/Projects/readinghelper' },
+    ]
+    expect(findGroupByWorkspaceCwd(groups, '\\\\192.168.31.92\\Projects\\dsh-coagenthub', rule)?.id).toBe('g1')
+    expect(findGroupByWorkspaceCwd(groups, '//192.168.31.92/Projects/readinghelper', rule)?.id).toBe('g2')
+    expect(findGroupByWorkspaceCwd(groups, '\\\\192.168.31.92\\Projects\\other', rule)).toBeNull()
+    // 无 mappingRule 时无法构造 UNC 候选 → 匹配不到。
+    expect(findGroupByWorkspaceCwd(groups, '\\\\192.168.31.92\\Projects\\dsh-coagenthub', undefined)).toBeNull()
+    // 盘符/POSIX 原有匹配不受影响。
+    expect(findGroupByWorkspaceCwd(groups, 'Z:\\dsh-coagenthub', rule)?.id).toBe('g1')
+    expect(findGroupByWorkspaceCwd(groups, '/Users/apple/Desktop/Projects/readinghelper', rule)?.id).toBe('g2')
   })
 })

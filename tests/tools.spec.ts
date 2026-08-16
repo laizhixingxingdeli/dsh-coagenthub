@@ -1394,6 +1394,66 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     }))
   })
 
+  it('get_active_group resolves the group from a UNC cwd via server/share + macPrefix when activeGroupId is empty', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [
+          group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub'),
+          group('g2', 'readinghelper', 'active', '/Users/apple/Desktop/Projects/readinghelper'),
+        ],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    // activeGroupId 为空:会话 cwd 为 UNC,按 \\server\share + macPrefix 反查命中 g1。
+    const result = (await tool.execute({}, {
+      agent: { session: { header: { cwd: '\\\\192.168.31.92\\Projects\\dsh-coagenthub' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({
+      groupId: 'g1',
+      groupTitle: 'dsh-coagenthub 插件开发',
+      projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
+      winPath: 'Z:\\dsh-coagenthub',
+    }))
+  })
+
+  it('get_active_group resolves the group from a forward-slash UNC cwd', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g2', 'readinghelper', 'active', '/Users/apple/Desktop/Projects/readinghelper')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await tool.execute({}, {
+      agent: { session: { header: { cwd: '//192.168.31.92/Projects/readinghelper' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({
+      groupId: 'g2',
+      groupTitle: 'readinghelper',
+      winPath: 'Z:\\readinghelper',
+    }))
+  })
+
+  it('get_active_group returns null when the UNC cwd matches no group', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    expect(await tool.execute({}, {
+      agent: { session: { header: { cwd: '\\\\192.168.31.92\\Projects\\nope' } } },
+    } as never)).toBeNull()
+  })
+
   it('get_active_group falls back to the cwd-matched group when the stored activeGroupId no longer exists', async () => {
     const store = new CoAgentHubSettingsStore(null)
     store.set({ activeGroupId: 'g1' })
