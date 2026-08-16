@@ -539,7 +539,7 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_dispatch_task',
       description:
-        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时优先用当前会话已保存的工作区映射(per-session,须在群列表中),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。',
+        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时优先用当前会话已保存的工作区映射(per-session,须在群列表中),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。planOnly=true 时只生成任务书预览(与真实下发渲染完全一致),不发送给执行器、不创建任务;返回 { planned: true, taskBook }。',
       parameters: {
         groupId: { type: 'string', description: 'Target group id. 可选:不传时自动回填(当前会话 per-session 映射优先 → 当前工作区 cwd 反查兜底)。' },
         body: { type: 'string', required: true, description: 'Task brief sent to the executor (plain text, kept verbatim).' },
@@ -547,6 +547,11 @@ export function createCoAgentHubTools(
           type: 'string',
           default: DEFAULT_EXECUTOR_NAME,
           description: 'Name fragment matching an executor participant, e.g. "AtomCode" or "Reasoning".',
+        },
+        planOnly: {
+          type: 'boolean',
+          default: false,
+          description: 'Dry-run 预览:true 时只渲染任务书,不发给执行器、不创建任务;默认 false 真实下发。',
         },
         goal: { type: 'string', description: '目标:要达成的结果。' },
         scope: { type: 'string', description: '范围:涉及/不涉及的边界。' },
@@ -558,13 +563,25 @@ export function createCoAgentHubTools(
       },
       output: {
         schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            messageId: { type: 'string', required: true },
-            executorParticipantId: { type: 'string', required: true },
-            executorName: { type: 'string', required: true },
-          },
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                messageId: { type: 'string', required: true },
+                executorParticipantId: { type: 'string', required: true },
+                executorName: { type: 'string', required: true },
+              },
+            },
+            {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                planned: { type: 'boolean', required: true },
+                taskBook: { type: 'string', required: true },
+              },
+            },
+          ],
         } as const,
         render: renderValue,
       },
@@ -572,6 +589,7 @@ export function createCoAgentHubTools(
         groupId?: string
         body: string
         executorName?: string
+        planOnly?: boolean
         goal?: string
         scope?: string
         acceptance?: string
@@ -580,10 +598,8 @@ export function createCoAgentHubTools(
         priority?: string
         dependencies?: string
       }, exec: ToolRunContext) {
-        // groupId 可选:显式传值优先,否则依次用当前会话 per-session 映射(须在
-        // 群列表中)、当前工作区 cwd 反查自动回填。
-        const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd, resolveLiveAgentSessionId)
-        const executor = await resolveExecutor(client, args.executorName)
+        // 任务书渲染与真实下发完全一致;planOnly 时只渲染预览,不做任何客户端
+        // 调用(不解析群/执行器、不发消息、不创建任务),返回 { planned: true, taskBook }。
         const taskBook = buildTaskBook({
           body: args.body,
           goal: args.goal,
@@ -594,6 +610,13 @@ export function createCoAgentHubTools(
           priority: args.priority,
           dependencies: args.dependencies,
         })
+        if (args.planOnly === true) {
+          return { planned: true, taskBook }
+        }
+        // groupId 可选:显式传值优先,否则依次用当前会话 per-session 映射(须在
+        // 群列表中)、当前工作区 cwd 反查自动回填。
+        const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd, resolveLiveAgentSessionId)
+        const executor = await resolveExecutor(client, args.executorName)
         try {
           const message = await client.postMessage(groupId, {
             body: taskBook,

@@ -1217,6 +1217,87 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(JSON.parse(String(init.body)).body).toBe('原样任务书')
   })
 
+  it('dispatch_task with planOnly renders the task book preview without posting a message', async () => {
+    const postMessage = vi.fn()
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = await execute(tool, { groupId: 'g1', body: '实现登录页', planOnly: true })
+
+    expect(postMessage).not.toHaveBeenCalled()
+    expect(result).toEqual({ planned: true, taskBook: '实现登录页' })
+  })
+
+  it('dispatch_task with planOnly makes no client calls and needs no group or executor resolution', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('planOnly must not hit the network'))
+    const client = clientWith(fetchImpl)
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = await execute(tool, { body: '预览任务', planOnly: true })
+
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(result).toEqual({ planned: true, taskBook: '预览任务' })
+  })
+
+  it('dispatch_task with planOnly false posts the message as usual', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = await execute(tool, { groupId: 'g1', body: '任务', planOnly: false })
+
+    expect(postMessage).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+  })
+
+  it('dispatch_task with planOnly renders structured fields into the task book preview', async () => {
+    const postMessage = vi.fn()
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = (await execute(tool, {
+      groupId: 'g1',
+      body: '实现登录页',
+      goal: '完成登录功能',
+      scope: '不含支付',
+      acceptance: '能登录、能登出',
+      tests: 'pnpm test 通过',
+      report: '提交 + 测试摘要',
+      priority: '高',
+      dependencies: '无',
+      planOnly: true,
+    })) as { planned: boolean; taskBook: string }
+
+    expect(postMessage).not.toHaveBeenCalled()
+    expect(result.planned).toBe(true)
+    expect(result.taskBook).toContain('实现登录页')
+    expect(result.taskBook).toContain('## 目标')
+    expect(result.taskBook).toContain('完成登录功能')
+    expect(result.taskBook).toContain('## 范围')
+    expect(result.taskBook).toContain('不含支付')
+    expect(result.taskBook).toContain('## 验收标准')
+    expect(result.taskBook).toContain('能登录、能登出')
+    expect(result.taskBook).toContain('## 测试要求')
+    expect(result.taskBook).toContain('pnpm test 通过')
+    expect(result.taskBook).toContain('## 汇报格式')
+    expect(result.taskBook).toContain('提交 + 测试摘要')
+    expect(result.taskBook).toContain('## 优先级')
+    expect(result.taskBook).toContain('高')
+    expect(result.taskBook).toContain('## 依赖')
+    expect(result.taskBook).toContain('无')
+  })
+
   it('get_workspace_instructions reads COAGENTHUB.md from the workspace root', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagenthub-ws-'))
     try {
