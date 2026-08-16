@@ -372,9 +372,9 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_dispatch_task',
       description:
-        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. 若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。',
+        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时自动使用当前活动群(activeGroupId),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。',
       parameters: {
-        groupId: { type: 'string', required: true, description: 'Target group id.' },
+        groupId: { type: 'string', description: 'Target group id. 可选:不传时自动回填(activeGroupId → 当前工作区 cwd 反查)。' },
         body: { type: 'string', required: true, description: 'Task brief sent to the executor (plain text, kept verbatim).' },
         executorName: {
           type: 'string',
@@ -402,7 +402,7 @@ export function createCoAgentHubTools(
         render: renderValue,
       },
       async execute(args: {
-        groupId: string
+        groupId?: string
         body: string
         executorName?: string
         goal?: string
@@ -412,7 +412,25 @@ export function createCoAgentHubTools(
         report?: string
         priority?: string
         dependencies?: string
-      }) {
+      }, exec: ToolRunContext) {
+        // groupId 可选:显式传值优先,否则依次用 activeGroupId、当前工作区 cwd 反查。
+        const settings = settingsStore?.get()
+        let groupId: string
+        if (args.groupId !== undefined && args.groupId.trim() !== '') {
+          groupId = args.groupId
+        } else if (settings?.activeGroupId !== undefined && settings.activeGroupId.trim() !== '') {
+          groupId = settings.activeGroupId
+        } else {
+          const matched = findGroupByWorkspaceCwd(
+            (await client.listGroups(100)).items,
+            workspaceRootFromExec(exec),
+            settings?.mappingRule,
+          )
+          if (matched === null) {
+            throw new Error('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
+          }
+          groupId = matched.id
+        }
         const executor = await resolveExecutor(client, args.executorName)
         const taskBook = buildTaskBook({
           body: args.body,
@@ -425,7 +443,7 @@ export function createCoAgentHubTools(
           dependencies: args.dependencies,
         })
         try {
-          const message = await client.postMessage(args.groupId, {
+          const message = await client.postMessage(groupId, {
             body: taskBook,
             audience: 'participant',
             audienceRef: executor.id,

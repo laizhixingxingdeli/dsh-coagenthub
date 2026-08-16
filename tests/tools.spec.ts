@@ -170,6 +170,81 @@ describe('createCoAgentHubTools', () => {
     expect(postMessage).toHaveBeenCalledTimes(1)
   })
 
+  it('dispatch_task prefers an explicit groupId over the stored activeGroupId', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g1' })
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const listGroups = vi.fn().mockResolvedValue({ items: [], total: 0 })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      if (String(url).endsWith('/groups?limit=100')) {
+        return listGroups()
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = (await execute(tool, { groupId: 'g2', body: '任务' })) as Record<string, unknown>
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+    const [url] = postMessage.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g2/messages')
+    expect(listGroups).not.toHaveBeenCalled()
+  })
+
+  it('dispatch_task falls back to the active group when groupId is omitted', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g1' })
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = (await execute(tool, { body: '任务' })) as Record<string, unknown>
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+    const [url] = postMessage.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g1/messages')
+  })
+
+  it('dispatch_task resolves groupId from the workspace cwd when groupId and activeGroupId are absent', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/groups?limit=100')) {
+        return Promise.resolve({
+          items: [{ id: 'g9', title: 'dsh-coagenthub 插件开发', status: 'active', projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub' }],
+          total: 1,
+        })
+      }
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = (await tool.execute({ body: '任务' }, {
+      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+    const [url] = postMessage.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g9/messages')
+  })
+
+  it('dispatch_task throws a clear error when no group can be resolved', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [{ id: 'g9', title: '别的项目', status: 'active', projectPath: '/Users/apple/Desktop/Projects/other' }],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    await expect(tool.execute({ body: '任务' }, {
+      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+    } as never)).rejects.toThrow('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
+  })
+
   it('get_messages filters by `after` and sorts newest first', async () => {
     const messages = [
       { id: 'm1', createdAt: '2026-08-14T01:00:00.000Z' },
