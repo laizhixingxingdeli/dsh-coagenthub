@@ -134,8 +134,8 @@ export async function findTaskOutput(
     const tasks = await client.listTasks(group.id, true)
     const task = tasks.find(candidate => candidate.id === taskId)
     if (task !== undefined) {
-      const tail = task.diffSummary?.outputTail
-      return { found: true, output: tail === undefined || tail === null ? null : tail }
+      const tail = task.diffSummary?.outputTail ?? task.outputTail ?? null
+      return { found: true, output: tail }
     }
   }
   return { found: false, output: null }

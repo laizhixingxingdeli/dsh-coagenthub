@@ -235,6 +235,28 @@ describe('raw task output endpoint (host)', () => {
     expect(res.body).toBe('line1\nline2')
   })
 
+  it('returns the top-level task outputTail when diffSummary has none (post-refactor payload)', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/groups?')) return Promise.resolve(jsonUpstream({ items: [{ id: 'g1' }], total: 1 }))
+      if (url.includes('/tasks?includeOutput=1')) {
+        return Promise.resolve(jsonUpstream([{
+          id: 't43',
+          diffSummary: { summary: null, hash: null, error: null, outputTail: null },
+          outputTail: 'top1\ntop2',
+        }]))
+      }
+      return Promise.resolve(jsonUpstream([]))
+    }))
+
+    const { handler } = captureHandler({}, store)
+    const res = makeRes()
+    await handler(makeReq('GET', '/coagenthub-api/raw/t43'), res as unknown as ServerResponse)
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('text/plain')
+    expect(res.body).toBe('top1\ntop2')
+  })
+
   it('404s with a hint when the task is unknown', async () => {
     const store = new CoAgentHubSettingsStore(null)
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonUpstream({ items: [], total: 0 })))
