@@ -132,8 +132,10 @@ export class TaskWatcher {
       case 'task_output': {
         if (groupId === undefined || typeof frame.taskId !== 'string') return
         const status = typeof frame.status === 'string' ? frame.status : undefined
-        // task_output 帧多为流式输出,仅对终态/停滞变化发通知,避免刷屏。
         if (status === undefined) return
+        // queued 是任务派发后的默认状态,推送无信息量,直接跳过。
+        if (status === 'queued') return
+        // task_output 帧多为流式输出,仅对终态/停滞变化发通知,避免刷屏。
         if (frame.type === 'task_output' && !['done', 'failed', 'stalled', 'cancelled'].includes(status)) return
         this.deliver.deliver({
           type: notificationTypeFor(status),
@@ -172,6 +174,7 @@ export class TaskWatcher {
       if (prev === task.status) continue
       this.previousStatuses.set(task.id, task.status)
       if (prev === undefined) continue // 首次见到:仅记录基线,不通知。
+      if (task.status === 'queued') continue // 回到 queued 不产生通知噪音。
       const summary = task.diffSummary?.summary ?? task.diffSummary?.error
       this.deliver.deliver({
         type: notificationTypeFor(task.status),
