@@ -19,28 +19,50 @@ describe('workspaceRootFromExec', () => {
     expect(root).toBe('Z:\\CoAgentHub')
   })
 
-  it('ignores stray fields on the session and still prefers header.cwd', () => {
-    // meta 在真实 Session 上不存在;即便传入也不应覆盖 header.cwd。
+  it('prefers header.cwd over the legacy session.meta.cwd and stray fields', () => {
+    // header.cwd 是真实路径;即便传入旧结构 meta.cwd 也不应覆盖它。
     const root = workspaceRootFromExec({
       agent: { session: { header: { cwd: '/ws/header' }, meta: { cwd: '/ws/meta' } } },
     })
     expect(root).toBe('/ws/header')
   })
 
-  it('falls back to process.cwd() when the exec carries no agent', () => {
-    expect(workspaceRootFromExec(undefined)).toBe(process.cwd())
-    expect(workspaceRootFromExec({})).toBe(process.cwd())
+  it('falls back to the legacy session.meta.cwd when header.cwd is absent', () => {
+    // 旧结构兼容:真实 Session 上无 meta 字段,但保留读取以兼容旧版本 dsh 运行时
+    // (与 index.ts 推送侧 resolveSessionGroupId 的读取方式一致)。
+    const root = workspaceRootFromExec({ agent: { session: { meta: { cwd: '/ws/meta' } } } })
+    expect(root).toBe('/ws/meta')
   })
 
-  it('falls back to process.cwd() when the agent has no session', () => {
-    const root = workspaceRootFromExec(execWithSession(undefined))
-    expect(root).toBe(process.cwd())
+  it('uses the live-agent resolver when the exec carries no agent', () => {
+    expect(workspaceRootFromExec(undefined, () => '/live/root')).toBe('/live/root')
+    expect(workspaceRootFromExec({}, () => '/live/root')).toBe('/live/root')
+    expect(workspaceRootFromExec(execWithSession(undefined), () => '/live/root')).toBe('/live/root')
   })
 
-  it('falls back to process.cwd() when header.cwd is absent or empty', () => {
-    expect(workspaceRootFromExec(execWithSession({}))).toBe(process.cwd())
-    const root = workspaceRootFromExec(execWithSession({ cwd: '   ' }))
-    expect(root).toBe(process.cwd())
+  it('prefers the exec session header.cwd over the live-agent resolver', () => {
+    const root = workspaceRootFromExec(execWithSession({ cwd: '/ws/header' }), () => '/live/root')
+    expect(root).toBe('/ws/header')
+  })
+
+  it('prefers the legacy meta.cwd over the live-agent resolver', () => {
+    const root = workspaceRootFromExec({ agent: { session: { meta: { cwd: '/ws/meta' } } } }, () => '/live/root')
+    expect(root).toBe('/ws/meta')
+  })
+
+  it('returns null when no session cwd is available and no resolver yields one', () => {
+    expect(workspaceRootFromExec(undefined)).toBeNull()
+    expect(workspaceRootFromExec({})).toBeNull()
+    expect(workspaceRootFromExec(execWithSession(undefined))).toBeNull()
+    expect(workspaceRootFromExec(execWithSession({}))).toBeNull()
+    expect(workspaceRootFromExec(execWithSession({ cwd: '   ' }))).toBeNull()
+    expect(workspaceRootFromExec({ agent: { session: { meta: { cwd: '   ' } } } })).toBeNull()
+  })
+
+  it('returns null when the live-agent resolver yields nothing or throws', () => {
+    expect(workspaceRootFromExec(undefined, () => null)).toBeNull()
+    expect(workspaceRootFromExec(undefined, () => '   ')).toBeNull()
+    expect(workspaceRootFromExec(undefined, () => { throw new Error('boom') })).toBeNull()
   })
 })
 

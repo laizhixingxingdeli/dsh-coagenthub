@@ -60,7 +60,7 @@ function execute(tool: ToolDefinition, args: Record<string, unknown>): Promise<u
   return tool.execute(args, {} as never)
 }
 
-/** Execute with an explicit session cwd (session header), overriding the process.cwd() fallback. */
+/** Execute with an explicit session cwd (session header);exec 的 cwd 优先于 live-agent 回退解析器。 */
 function executeWithCwd(tool: ToolDefinition, args: Record<string, unknown>, cwd: string): Promise<unknown> {
   return tool.execute(args, { agent: { session: { header: { cwd } } } } as never)
 }
@@ -281,6 +281,45 @@ describe('createCoAgentHubTools', () => {
     await expect(tool.execute({ body: '任务' }, {
       agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)).rejects.toThrow('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
+  })
+
+  it('dispatch_task resolves groupId from the live root agent cwd when exec carries no agent', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/groups?limit=100')) {
+        return Promise.resolve({
+          items: [{ id: 'g9', title: 'ReadingHelper', status: 'active', projectPath: '/Users/apple/Desktop/Projects/readinghelper' }],
+          total: 1,
+        })
+      }
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client, undefined, () => '/Users/apple/Desktop/Projects/readinghelper')
+      .find(t => t.name === 'coagenthub_dispatch_task')!
+    // exec 未携带 agent(web 客户端桥接 / SDK 直调):cwd 由 live root agent 解析器回退。
+    const result = (await execute(tool, { body: '任务' })) as Record<string, unknown>
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+    const [url] = postMessage.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g9/messages')
+  })
+
+  it('dispatch_task does not fall back to process.cwd() when no cwd is resolvable', async () => {
+    // 常驻 web 进程里 process.cwd() 是 dsh 启动目录;即便它恰好命中某个群,
+    // 拿不到会话 cwd 也必须报错,而非误判到启动目录绑定的群。
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return Promise.resolve({
+        items: [{ id: 'g9', title: 'dsh-coagenthub 插件开发', status: 'active', projectPath: process.cwd() }],
+        total: 1,
+      })
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    await expect(execute(tool, { body: '任务' })).rejects.toThrow('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
   })
 
   it('get_messages filters by `after` and sorts newest first', async () => {
@@ -1297,5 +1336,117 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       agent: { session: { header: { cwd: 'Y:\\dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual({ groupId: 'g3', groupTitle: '映射群', instructions: null })
+  })
+
+  it('get_active_group resolves the group from the live root agent cwd (Mac session, ReadingHelper)', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g9', 'ReadingHelper', 'active', '/Users/apple/Desktop/Projects/readinghelper')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, undefined, () => '/Users/apple/Desktop/Projects/readinghelper')
+      .find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await execute(tool, {})) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({ groupId: 'g9', groupTitle: 'ReadingHelper' }))
+  })
+
+  it('get_active_group resolves the live root agent cwd via the Z: mapping (Windows session)', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ mappingRule: { macPrefix: '/Users/apple/Desktop/Projects/', winPrefix: 'Z:\\' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g9', 'ReadingHelper', 'active', '/Users/apple/Desktop/Projects/readinghelper')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store, () => 'Z:\\readinghelper')
+      .find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await execute(tool, {})) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({ groupId: 'g9', winPath: 'Z:\\readinghelper' }))
+  })
+
+  it('get_active_group prefers the exec agent cwd over the live root agent resolver', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [
+          group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub'),
+          group('g2', 'ReadingHelper', 'active', '/Users/apple/Desktop/Projects/readinghelper'),
+        ],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, undefined, () => '/Users/apple/Desktop/Projects/readinghelper')
+      .find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await tool.execute({}, {
+      agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({ groupId: 'g1' }))
+  })
+
+  it('get_active_group resolves the group from the legacy session.meta.cwd when header.cwd is absent', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g9', 'ReadingHelper', 'active', '/Users/apple/Desktop/Projects/readinghelper')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_active_group')!
+    const result = (await tool.execute({}, {
+      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/readinghelper' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({ groupId: 'g9', groupTitle: 'ReadingHelper' }))
+  })
+
+  it('get_active_group does not fall back to process.cwd() (no session cwd, no resolver)', async () => {
+    // 回归:修复前 workspaceRootFromExec 在 exec 无 agent 时回退 process.cwd(),
+    // 常驻 web 进程会把会话误判到 dsh 启动目录绑定的群。
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g9', 'dsh-coagenthub 插件开发', 'active', process.cwd())],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_active_group')!
+    expect(await execute(tool, {})).toBeNull()
+  })
+
+  it('get_workspace_instructions fills groupId/groupTitle from the live root agent cwd', async () => {
+    const client = clientWith(() =>
+      Promise.resolve({ items: [group('g3', '映射群', 'active', '/repo/x')], total: 1 }),
+    )
+    const tool = createCoAgentHubTools(client, undefined, () => '/repo/x')
+      .find(t => t.name === 'coagenthub_get_workspace_instructions')!
+    const result = (await execute(tool, {})) as Record<string, unknown>
+    expect(result).toEqual({ groupId: 'g3', groupTitle: '映射群', instructions: null })
+  })
+
+  it('get_notifications resolves the group from the live root agent cwd when exec carries no agent', async () => {
+    notificationQueue.drain()
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
+    const client = clientWith(() =>
+      Promise.resolve({ items: [group('g1', '群一', 'active', '/repo/a')], total: 1 }),
+    )
+    const tool = createCoAgentHubTools(client, undefined, () => '/repo/a')
+      .find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await execute(tool, {})) as Array<{ groupId: string }>
+    expect(result).toEqual([expect.objectContaining({ groupId: 'g1' })])
+    notificationQueue.drain()
+  })
+
+  it('get_notifications does not fall back to process.cwd() when no cwd is resolvable', async () => {
+    notificationQueue.drain()
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g9', taskId: 't1', status: 'done', time: 't' })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g9', 'dsh-coagenthub 插件开发', 'active', process.cwd())],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await execute(tool, {})) as unknown[]
+    expect(result).toEqual([])
+    expect(notificationQueue.size).toBe(1)
+    notificationQueue.drain()
   })
 })

@@ -87,7 +87,19 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     // Share the proxy's settings store so panel saves also steer the tools.
     settingsStore,
   })
-  ctx.effect(() => registerCoAgentHubTools(ctx, client, settingsStore), 'coagenthub.tools()')
+  ctx.effect(() => {
+    // 工具的 live root agent cwd 回退解析器:晚绑定 agentsRegistry(由下方
+    // ctx.inject(['agents']) 接线后赋值),解析器只在被调用时现查
+    // registry.roots()[0] 的会话目录;agents 服务未接线/已下线时返回 null,
+    // 工具层拿不到会话 cwd 即回退 settings.activeGroupId,绝不误用 process.cwd()。
+    return registerCoAgentHubTools(ctx, client, settingsStore, () => {
+      const agent = agentsRegistry?.roots()[0]
+      // 与推送侧 resolveSessionGroupId 一致:header.cwd 优先,旧结构 meta.cwd 兜底。
+      const session = agent?.session as { header?: { cwd?: string }; meta?: { cwd?: string } } | undefined
+      const cwd = session?.header?.cwd ?? session?.meta?.cwd
+      return cwd !== undefined && cwd !== null && cwd.trim() !== '' ? cwd : null
+    })
+  }, 'coagenthub.tools()')
 
   // B 方案后台事件链路:WS 订阅 + 低频轮询兜底。通知走主动推送适配器:
   // dsh 运行时暴露 ctx.agents 注册表时,用 agent.followup 排队 next-turn
@@ -98,6 +110,9 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     reason: 'dsh 运行时未暴露 ctx.agents 注册表(无 agent.followup 唤醒能力)',
     log,
   })
+  // 晚绑定的 agents 注册表:inject 接线后赋值,供工具层 live-agent cwd 回退
+  // 解析器与通知推送共用;agents 服务下线时清空,回退到无 live agent 状态。
+  let agentsRegistry: { roots(): Agent[] } | undefined
   // 通知 deliverer 起步为队列回退;agents 服务可用后动态切到主动推送。
   const deliverer = createNotificationDeliverer(nullAdapter())
   // 会话→群反查缓存(推送隔离用),按插件实例隔离。TTL 后既不读也不保留:
@@ -120,6 +135,7 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   // 构造时 parent.fiber.effect),插件卸载时级联卸载,无需额外清理。
   void ctx.inject(['agents'], (agentsCtx) => {
     const registry = (agentsCtx as Context & { agents: { roots(): Agent[] } }).agents
+    agentsRegistry = registry
     ctx.logger?.('coagenthub').info('dsh 运行时支持主动唤醒(agent.followup),通知将直接推送进会话并唤醒 driver')
     deliverer.setPushAdapter(new DshAgentPushAdapter({
       resolveAgent: () => registry.roots()[0],
@@ -186,6 +202,7 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     // cordis 会卸载该 fiber 并调用它,把 deliverer 回退到队列模式,避免继续
     // 使用已失效的注册表;服务重新出现时 fiber 重载,重新切换回 followup。
     return () => {
+      agentsRegistry = undefined
       ctx.logger?.('coagenthub').warn('dsh 运行时 agents 服务已下线,主动推送回退队列;通知由 coagenthub_get_notifications 补读')
       deliverer.setPushAdapter(nullAdapter())
     }

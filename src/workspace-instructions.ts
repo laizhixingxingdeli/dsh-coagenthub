@@ -22,45 +22,69 @@ export const WORKSPACE_INSTRUCTIONS_FILE = 'COAGENTHUB.md'
  *   Session.header: SessionHeader          (总是存在;无 store 元数据时合成最小 header)
  *   SessionHeader.cwd?: string             (会话创建时的绝对工作目录,若有)
  * 因此 exec 里会话 cwd 的真实字段路径是 `agent.session.header.cwd`。
- * 注意 Session 上**没有** `meta` 字段——`meta` 只存在于 CreateSessionOptions /
- * CreateAgentOptions(创建选项),创建时会折叠进 header,旧代码读的
- * `session.meta.cwd` 在真实结构里不存在。
+ * 真实 Session 上**没有** `meta` 字段(meta 只在 CreateSessionOptions /
+ * CreateAgentOptions 创建选项里,创建时会折叠进 header),但保留读取
+ * `session.meta?.cwd` 以兼容旧版本 dsh 运行时/旧数据结构(与 index.ts 推送侧
+ * resolveSessionGroupId 的读取方式一致)。
  */
 export interface WorkspaceExecLike {
   agent?: {
     session?: {
       /** 会话头字段(真实路径):dsh-session SessionHeader.cwd,会话创建时的绝对工作目录。 */
       header?: { cwd?: string }
+      /** 旧结构兼容:dsh-session CreateSessionOptions.meta 里的 cwd(真实 Session 上没有该字段)。 */
+      meta?: { cwd?: string }
     }
   }
 }
 
 /**
+ * 从 live root agent 会话解析 cwd 的回退解析器。工具经非 agent 路径执行
+ * (web 客户端桥接 / SDK 直调)时 `exec.agent` 缺失,此时用 dsh 运行时注册表
+ * 的 root agent 会话目录作为回退(与 index.ts 推送侧 resolveSessionGroupId
+ * 读取方式一致)。解析器能拿到 `agent.session.header.cwd` 或
+ * `agent.session.meta?.cwd` 时才返回该 cwd,否则返回 null。
+ */
+export type LiveAgentCwdResolver = () => string | null
+
+function isUsableCwd(cwd: string | null | undefined): cwd is string {
+  return cwd !== undefined && cwd !== null && cwd.trim() !== ''
+}
+
+/**
  * Resolve the current workspace root from a tool exec context. 优先读
- * `agent.session.header.cwd`(真实路径,见 {@link WorkspaceExecLike});拿不到时
- * 回退 `process.cwd()`(headless / exec 未携带 agent,或会话创建时未携带存储
- * 元数据导致 header.cwd 为空);两者都不可用时返回 null。
+ * `agent.session.header.cwd`(真实路径,见 {@link WorkspaceExecLike});其次兼容
+ * 旧结构 `agent.session.meta?.cwd`;两者都没有时尝试 `resolveLiveAgentCwd`
+ * (live root agent 会话目录,覆盖 exec.agent 缺失的桥接/SDK 直调路径);
+ * 全部拿不到时返回 null。
  *
- * exec.agent 是可选字段("set by the agent loop"):工具经非 agent 路径执行(如
- * web 客户端桥接、SDK 直调)时 exec 上可能没有 agent,此时 exec 里没有其它字段
- * 能还原会话 cwd(仅 agent.id / session.id 可标识会话,但不携带路径),只能回退
- * process.cwd()。若部署中 header.cwd 持续为空,应排查会话创建端是否通过
+ * **不再回退 `process.cwd()`**:常驻 dsh web 进程的 process.cwd() 是 dsh 启动
+ * 目录(本插件仓库根目录)而非会话所在目录,回退它会把会话误判到启动目录绑定
+ * 的群。若部署中 header.cwd 持续为空,应排查会话创建端是否通过
  * ctx.sessions.create / CreateAgentOptions 的 meta 传入 cwd。
  *
  * `exec` is typed `unknown` because the real `ToolRunContext.agent` type is
  * opaque to this module; only the `cwd` field is read, so a structural cast is
  * enough and keeps this file free of dsh runtime type imports.
  */
-export function workspaceRootFromExec(exec: unknown): string | null {
+export function workspaceRootFromExec(
+  exec: unknown,
+  resolveLiveAgentCwd?: LiveAgentCwdResolver,
+): string | null {
   const ctx = exec as WorkspaceExecLike | undefined
-  const cwd = ctx?.agent?.session?.header?.cwd
-  if (cwd !== undefined && cwd !== null && cwd.trim() !== '') return cwd
-  try {
-    const fallback = process.cwd()
-    return fallback.trim() !== '' ? fallback : null
-  } catch {
-    return null
+  const headerCwd = ctx?.agent?.session?.header?.cwd
+  if (isUsableCwd(headerCwd)) return headerCwd
+  const metaCwd = ctx?.agent?.session?.meta?.cwd
+  if (isUsableCwd(metaCwd)) return metaCwd
+  if (resolveLiveAgentCwd !== undefined) {
+    try {
+      const liveCwd = resolveLiveAgentCwd()
+      if (isUsableCwd(liveCwd)) return liveCwd
+    } catch {
+      // 解析器失败视为拿不到 cwd,继续返回 null。
+    }
   }
+  return null
 }
 
 /**

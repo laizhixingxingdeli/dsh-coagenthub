@@ -14,6 +14,7 @@ import type { CoAgentHubSettingsStore } from './config.ts'
 import { notificationQueue } from './notification-queue.ts'
 import { buildTaskBook } from './task-book.ts'
 import { findGroupByWorkspaceCwd, groupProjectWinPath } from './workspace.ts'
+import type { LiveAgentCwdResolver } from './workspace-instructions.ts'
 import { readWorkspaceInstructions, workspaceRootFromExec } from './workspace-instructions.ts'
 
 const DEFAULT_EXECUTOR_NAME = 'AtomCode'
@@ -91,18 +92,23 @@ const GROUP_ID_DESCRIPTION =
  * cwd-based backfill through the workspace mapping, then the stored
  * activeGroupId as a last fallback. Throws a clear error when nothing
  * resolves so the agent passes an explicit groupId.
+ *
+ * 会话 cwd 统一解析:exec agent 优先,exec 拿不到时回退 live root agent
+ * (resolveLiveAgentCwd,见 workspaceRootFromExec)——绝不回退 process.cwd(),
+ * 避免常驻 web 进程把会话误判到 dsh 启动目录绑定的群。
  */
 async function resolveGroupId(
   args: { groupId?: string },
   exec: ToolRunContext,
   client: CoAgentHubClient,
   settingsStore: CoAgentHubSettingsStore | undefined,
+  resolveLiveAgentCwd?: LiveAgentCwdResolver,
 ): Promise<string> {
   const settings = settingsStore?.get()
   if (args.groupId !== undefined && args.groupId.trim() !== '') return args.groupId
   const matched = findGroupByWorkspaceCwd(
     (await client.listGroups(100)).items,
-    workspaceRootFromExec(exec),
+    workspaceRootFromExec(exec, resolveLiveAgentCwd),
     settings?.mappingRule,
   )
   if (matched !== null) return matched.id
@@ -369,10 +375,16 @@ const NOTIFICATION_VIEW_SCHEMA = {
   },
 } as const
 
-/** Build the eight CoAgentHub tool definitions against one client. */
+/**
+ * Build the CoAgentHub tool definitions against one client. 会话 cwd 解析统一
+ * 走 workspaceRootFromExec(exec agent 优先,其次 live root agent 回退);工具经
+ * 非 agent 路径执行(web 客户端桥接 / SDK 直调)且 exec 未携带 agent 时,
+ * resolveLiveAgentCwd 提供 dsh 运行时 root agent 的会话目录。
+ */
 export function createCoAgentHubTools(
   client: CoAgentHubClient,
   settingsStore?: CoAgentHubSettingsStore,
+  resolveLiveAgentCwd?: LiveAgentCwdResolver,
 ): ToolDefinition[] {
   return [
     defineTool({
@@ -431,7 +443,7 @@ export function createCoAgentHubTools(
         audienceRef?: string
       }, exec: ToolRunContext) {
         try {
-          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
           const message = await client.postMessage(groupId, {
             body: args.body,
             audience: args.audience ?? 'broadcast',
@@ -489,7 +501,7 @@ export function createCoAgentHubTools(
         dependencies?: string
       }, exec: ToolRunContext) {
         // groupId 可选:显式传值优先,否则依次用当前工作区 cwd 反查、activeGroupId 兜底。
-        const groupId = await resolveGroupId(args, exec, client, settingsStore)
+        const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
         const executor = await resolveExecutor(client, args.executorName)
         const taskBook = buildTaskBook({
           body: args.body,
@@ -531,7 +543,7 @@ export function createCoAgentHubTools(
       output: { schema: { type: 'array', items: TASK_VIEW_SCHEMA } as const, render: renderValue },
       async execute(args: { groupId?: string }, exec: ToolRunContext) {
         try {
-          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
           const [tasks, participants] = await Promise.all([client.listTasks(groupId), client.listParticipants()])
           const nameById = new Map(participants.map(participant => [participant.id, participant.name]))
           return tasks.map(task => ({
@@ -561,7 +573,7 @@ export function createCoAgentHubTools(
       output: { schema: { type: 'array', items: MESSAGE_VIEW_SCHEMA } as const, render: renderValue },
       async execute(args: { groupId?: string; after?: string }, exec: ToolRunContext) {
         try {
-          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
           const messages = await client.listMessages(groupId)
           const afterMs = args.after === undefined ? undefined : Date.parse(args.after)
           const filtered = afterMs === undefined || Number.isNaN(afterMs)
@@ -604,7 +616,7 @@ export function createCoAgentHubTools(
         try {
           const settings = settingsStore?.get()
           const activeGroupId = settings?.activeGroupId
-          const cwd = workspaceRootFromExec(exec)
+          const cwd = workspaceRootFromExec(exec, resolveLiveAgentCwd)
           const groups = await client.listGroups(100)
           const group = findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule)
             ?? (activeGroupId !== undefined && activeGroupId.trim() !== ''
@@ -647,7 +659,7 @@ export function createCoAgentHubTools(
         try {
           const settings = settingsStore?.get()
           const activeGroupId = settings?.activeGroupId
-          const cwd = workspaceRootFromExec(exec)
+          const cwd = workspaceRootFromExec(exec, resolveLiveAgentCwd)
           let groupId: string | null = null
           let groupTitle: string | null = null
           const groups = await client.listGroups(100)
@@ -709,7 +721,7 @@ export function createCoAgentHubTools(
       output: { schema: GROUP_DETAIL_VIEW_SCHEMA, render: renderValue },
       async execute(args: { groupId?: string }, exec: ToolRunContext) {
         try {
-          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
           const group = await client.getGroup(groupId)
           // members 归一化:每项 { id, name, device },缺失字段补 null,
           // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
@@ -739,7 +751,7 @@ export function createCoAgentHubTools(
       },
       output: { schema: { type: 'array', items: GROUP_MEMBER_VIEW_SCHEMA } as const, render: renderValue },
       async execute(args: { groupId?: string }, exec: ToolRunContext) {
-        const groupId = await resolveGroupId(args, exec, client, settingsStore)
+        const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
         try {
           const members = await client.getGroupMembers(groupId)
           // 归一化:缺失的 device/prompt/joinedAt 补 null、roles 兜底为数组,
@@ -776,7 +788,7 @@ export function createCoAgentHubTools(
         if (args.title === undefined && args.projectPath === undefined) {
           throw new Error('title 和 projectPath 至少传一个:请提供要修改的字段')
         }
-        const groupId = await resolveGroupId(args, exec, client, settingsStore)
+        const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
         const patch: { title?: string; projectPath?: string | null } = {}
         if (args.title !== undefined) patch.title = args.title
         if (args.projectPath !== undefined) {
@@ -814,7 +826,7 @@ export function createCoAgentHubTools(
       output: { schema: GROUP_MEMBER_VIEW_SCHEMA, render: renderValue },
       async execute(args: { groupId?: string; participantId: string; roles?: string[] }, exec: ToolRunContext) {
         try {
-          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
           const member = await client.addGroupMember(groupId, {
             participantId: args.participantId,
             roles: args.roles === undefined ? ['executor'] : args.roles,
@@ -846,7 +858,7 @@ export function createCoAgentHubTools(
       output: { schema: REMOVE_MEMBER_VIEW_SCHEMA, render: renderValue },
       async execute(args: { groupId?: string; participantId: string }, exec: ToolRunContext) {
         try {
-          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
           await client.removeGroupMember(groupId, args.participantId)
           return { ok: true }
         } catch (error) {
@@ -891,7 +903,7 @@ export function createCoAgentHubTools(
       output: { schema: TASK_DETAIL_VIEW_SCHEMA, render: renderValue },
       async execute(args: { groupId?: string; taskId: string }, exec: ToolRunContext) {
         try {
-          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
           const [task, participants] = await Promise.all([
             client.getTask(groupId, args.taskId),
             client.listParticipants(),
@@ -957,7 +969,7 @@ export function createCoAgentHubTools(
       output: { schema: TASK_UPDATE_VIEW_SCHEMA, render: renderValue },
       async execute(args: { groupId?: string; taskId: string; brief: string }, exec: ToolRunContext) {
         try {
-          const groupId = await resolveGroupId(args, exec, client, settingsStore)
+          const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
           const [task, participants] = await Promise.all([
             client.updateTaskBrief(groupId, args.taskId, args.brief),
             client.listParticipants(),
@@ -1001,7 +1013,7 @@ export function createCoAgentHubTools(
           // 只 drain 该群的通知,其他群的通知保留在队列里(不会串到当前会话也不会丢失);
           // 反查不到群时返回空且不消费队列。
           const settings = settingsStore?.get()
-          const cwd = workspaceRootFromExec(exec)
+          const cwd = workspaceRootFromExec(exec, resolveLiveAgentCwd)
           const groups = await client.listGroups(100)
           const byCwd = findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule)
           const activeGroupId = settings?.activeGroupId
@@ -1030,13 +1042,14 @@ export function createCoAgentHubTools(
   ]
 }
 
-/** Register the eight CoAgentHub tools on a dsh tools runtime. */
+/** Register the CoAgentHub tools on a dsh tools runtime. */
 export function registerCoAgentHubTools(
   ctx: Context,
   client: CoAgentHubClient,
   settingsStore?: CoAgentHubSettingsStore,
+  resolveLiveAgentCwd?: LiveAgentCwdResolver,
 ): () => void {
-  const disposers = createCoAgentHubTools(client, settingsStore).map(definition => ctx.tools.register(definition))
+  const disposers = createCoAgentHubTools(client, settingsStore, resolveLiveAgentCwd).map(definition => ctx.tools.register(definition))
   return () => {
     for (const dispose of disposers) dispose()
   }
