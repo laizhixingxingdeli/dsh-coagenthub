@@ -257,7 +257,7 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     expect(select.textContent).toContain('Z:\\dsh-coagenthub')
   })
 
-  it('默认选中「自动（按 cwd）」:无保存记录时不写存储也不镜像 host', async () => {
+  it('默认选中「自动（按 cwd）」:无保存记录时清空 host activeGroupId(不写本地存储)', async () => {
     const fetchMock = workspacePanelFetchMock([PROJECTION])
     vi.stubGlobal('fetch', fetchMock)
 
@@ -270,9 +270,13 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     // 无 per-session 保存记录 → 默认「自动（按 cwd）」
     expect(select.value).toBe('')
     expect(select.textContent).toContain('自动（按 cwd）')
-    // 初始化不写 host activeGroupId
-    expect(fetchMock).not.toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+    // 本地存储不写入任何 per-session/全局 key
+    expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBeNull()
+    // 但 host 镜像被清空(null → 空串),避免沿用上一会话的残留
+    expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
       method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activeGroupId: '' }),
     }))
   })
 
@@ -288,11 +292,12 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     })
     fireEvent.change(select, { target: { value: 'g1' } })
 
-    // 未保存:下拉变了,但没有写入任何存储/镜像
+    // 未保存:下拉变了,但没有写入任何存储,也没有镜像 g1(mount 时仅清空过 host)
     expect(select.value).toBe('g1')
     expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBeNull()
     expect(fetchMock).not.toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
       method: 'PUT',
+      body: JSON.stringify({ activeGroupId: 'g1' }),
     }))
 
     // 出现「保存工作区」按钮,点了才写 localStorage 并镜像 host
@@ -306,6 +311,81 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ activeGroupId: 'g1' }),
     }))
+  })
+
+  it('新会话无 per-session 保存值时,挂载即清空 host activeGroupId', async () => {
+    const fetchMock = workspacePanelFetchMock([PROJECTION])
+    vi.stubGlobal('fetch', fetchMock)
+    // 模拟残留:全局 key 还留着上一个会话手动选的值,但新会话没有 per-session 记忆
+    localStorage.setItem(ACTIVE_GROUP_STORAGE_KEY, 'g-stale')
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-new' }))
+
+    render(<CoAgentHubPanel />)
+
+    // host 被清空(null → 空串),agent 侧工具回落按会话 cwd 自动解析
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeGroupId: '' }),
+      }))
+    })
+    // 只清空 host,不写任何 per-session 记忆
+    expect(localStorage.getItem(activeGroupSessionKey('session-new'))).toBeNull()
+  })
+
+  it('新会话有 per-session 保存值时,挂载镜像该值到 host activeGroupId', async () => {
+    const fetchMock = workspacePanelFetchMock([PROJECTION])
+    vi.stubGlobal('fetch', fetchMock)
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
+    localStorage.setItem(activeGroupSessionKey('session-a'), 'g1')
+
+    render(<CoAgentHubPanel />)
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeGroupId: 'g1' }),
+      }))
+    })
+  })
+
+  it('切换会话时,host activeGroupId 按目标会话的 per-session 值同步', async () => {
+    const fetchMock = workspacePanelFetchMock([PROJECTION])
+    vi.stubGlobal('fetch', fetchMock)
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
+    localStorage.setItem(activeGroupSessionKey('session-a'), 'g1')
+
+    render(<CoAgentHubPanel />)
+
+    // 初始:session-a 的记忆 g1 镜像到 host
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ activeGroupId: 'g1' }),
+      }))
+    })
+
+    // 切到 session-b:该会话无记忆 → host 被清空,回落 cwd 自动解析
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-b' }))
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ activeGroupId: '' }),
+      }))
+    })
+
+    // session-b 有了自己的记忆后,focus 刷新应镜像该值(不同值,证明是新的同步)
+    localStorage.setItem(activeGroupSessionKey('session-b'), 'g2')
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ activeGroupId: 'g2' }),
+      }))
+    })
   })
 
   it('有保存记录时,任务面板默认选中该群', async () => {
