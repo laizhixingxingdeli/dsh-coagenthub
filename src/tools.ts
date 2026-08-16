@@ -84,13 +84,13 @@ function serverErrorMessage(error: CoAgentHubError): string {
 }
 
 const GROUP_ID_DESCRIPTION =
-  'Target group id. 可选:不传时自动回填(activeGroupId → 当前工作区 cwd 反查)。'
+  'Target group id. 可选:不传时自动回填(当前工作区 cwd 反查 → activeGroupId 兜底)。'
 
 /**
- * Resolve the group a tool should operate on: an explicit groupId wins, then
- * the stored activeGroupId, then a cwd-based backfill through the workspace
- * mapping. Throws a clear error when nothing resolves so the agent passes an
- * explicit groupId.
+ * Resolve the group a tool should operate on: an explicit groupId wins, then a
+ * cwd-based backfill through the workspace mapping, then the stored
+ * activeGroupId as a last fallback. Throws a clear error when nothing
+ * resolves so the agent passes an explicit groupId.
  */
 async function resolveGroupId(
   args: { groupId?: string },
@@ -100,16 +100,14 @@ async function resolveGroupId(
 ): Promise<string> {
   const settings = settingsStore?.get()
   if (args.groupId !== undefined && args.groupId.trim() !== '') return args.groupId
-  if (settings?.activeGroupId !== undefined && settings.activeGroupId.trim() !== '') return settings.activeGroupId
   const matched = findGroupByWorkspaceCwd(
     (await client.listGroups(100)).items,
     workspaceRootFromExec(exec),
     settings?.mappingRule,
   )
-  if (matched === null) {
-    throw new Error('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
-  }
-  return matched.id
+  if (matched !== null) return matched.id
+  if (settings?.activeGroupId !== undefined && settings.activeGroupId.trim() !== '') return settings.activeGroupId
+  throw new Error('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
 }
 
 /**
@@ -449,9 +447,9 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_dispatch_task',
       description:
-        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时自动使用当前活动群(activeGroupId),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。',
+        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时按当前工作区 cwd 反查匹配群,否则用活动群(activeGroupId)兜底;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。',
       parameters: {
-        groupId: { type: 'string', description: 'Target group id. 可选:不传时自动回填(activeGroupId → 当前工作区 cwd 反查)。' },
+        groupId: { type: 'string', description: 'Target group id. 可选:不传时自动回填(当前工作区 cwd 反查 → activeGroupId 兜底)。' },
         body: { type: 'string', required: true, description: 'Task brief sent to the executor (plain text, kept verbatim).' },
         executorName: {
           type: 'string',
@@ -490,7 +488,7 @@ export function createCoAgentHubTools(
         priority?: string
         dependencies?: string
       }, exec: ToolRunContext) {
-        // groupId 可选:显式传值优先,否则依次用 activeGroupId、当前工作区 cwd 反查。
+        // groupId 可选:显式传值优先,否则依次用当前工作区 cwd 反查、activeGroupId 兜底。
         const groupId = await resolveGroupId(args, exec, client, settingsStore)
         const executor = await resolveExecutor(client, args.executorName)
         const taskBook = buildTaskBook({
@@ -581,7 +579,7 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_get_active_group',
       description:
-        'Return the currently selected CoAgentHub virtual workspace (the group chosen in the panel 当前工作区 dropdown) as { groupId, groupTitle, projectPath?, winPath?, instructions? }; null when nothing is selected. Useful to scope a task or message to the user\'s active group.',
+        'Resolve the CoAgentHub virtual workspace for the current session: the group matched from the session cwd via the workspace mapping, falling back to the group selected in the panel 当前工作区 dropdown (activeGroupId) when cwd matches nothing. Returns { groupId, groupTitle, projectPath?, winPath?, instructions? }; null when nothing resolves. Useful to scope a task or message to the user\'s workspace group.',
       parameters: {},
       output: {
         schema: {
@@ -608,9 +606,10 @@ export function createCoAgentHubTools(
           const activeGroupId = settings?.activeGroupId
           const cwd = workspaceRootFromExec(exec)
           const groups = await client.listGroups(100)
-          const group = activeGroupId !== undefined && activeGroupId.trim() !== ''
-            ? groups.items.find(candidate => candidate.id === activeGroupId)
-            : findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule) ?? undefined
+          const group = findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule)
+            ?? (activeGroupId !== undefined && activeGroupId.trim() !== ''
+              ? groups.items.find(candidate => candidate.id === activeGroupId) ?? undefined
+              : undefined)
           if (group === undefined) return null
           const winPath = groupProjectWinPath(group.projectPath, settings?.mappingRule)
           const instructions = await readWorkspaceInstructions(cwd)
@@ -630,7 +629,7 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_get_workspace_instructions',
       description:
-        'Return the workspace-level instructions for the current session: reads COAGENTHUB.md from the current dsh workspace root and pairs it with the active group id/title. 非插件工作区(无 COAGENTHUB.md)返回 instructions: null.',
+        'Return the workspace-level instructions for the current session: reads COAGENTHUB.md from the current dsh workspace root and pairs it with the group resolved from the session cwd (falling back to the active group id/title). 非插件工作区(无 COAGENTHUB.md)返回 instructions: null.',
       parameters: {},
       output: {
         schema: {
@@ -652,9 +651,10 @@ export function createCoAgentHubTools(
           let groupId: string | null = null
           let groupTitle: string | null = null
           const groups = await client.listGroups(100)
-          const group = activeGroupId !== undefined && activeGroupId.trim() !== ''
-            ? groups.items.find(candidate => candidate.id === activeGroupId)
-            : findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule) ?? undefined
+          const group = findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule)
+            ?? (activeGroupId !== undefined && activeGroupId.trim() !== ''
+              ? groups.items.find(candidate => candidate.id === activeGroupId) ?? undefined
+              : undefined)
           if (group !== undefined) {
             groupId = group.id
             groupTitle = group.title
