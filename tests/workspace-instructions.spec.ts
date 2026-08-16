@@ -4,29 +4,42 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WORKSPACE_INSTRUCTIONS_FILE, readWorkspaceInstructions, workspaceRootFromExec } from '../src/workspace-instructions.ts'
 
-function execWith(session: { header?: { cwd?: string }; meta?: { cwd?: string } } | undefined): unknown {
-  return { agent: { session } }
+/**
+ * 按 dsh-tools 真实类型链构造 exec:ToolRunContext.agent.session 是
+ * dsh-session 的 Session 类,会话 cwd 在 SessionHeader.cwd(即
+ * agent.session.header.cwd);Session 上没有 meta 字段。
+ */
+function execWithSession(header: { cwd?: string } | undefined): unknown {
+  return { agent: { session: header !== undefined ? { header } : undefined } }
 }
 
 describe('workspaceRootFromExec', () => {
-  it('prefers session.header.cwd over the legacy session.meta.cwd', () => {
-    const root = workspaceRootFromExec(execWith({ header: { cwd: '/ws/header' }, meta: { cwd: '/ws/meta' } }))
+  it('reads the session cwd from the real exec shape agent.session.header.cwd', () => {
+    const root = workspaceRootFromExec(execWithSession({ cwd: 'Z:\\CoAgentHub' }))
+    expect(root).toBe('Z:\\CoAgentHub')
+  })
+
+  it('ignores stray fields on the session and still prefers header.cwd', () => {
+    // meta 在真实 Session 上不存在;即便传入也不应覆盖 header.cwd。
+    const root = workspaceRootFromExec({
+      agent: { session: { header: { cwd: '/ws/header' }, meta: { cwd: '/ws/meta' } } },
+    })
     expect(root).toBe('/ws/header')
   })
 
-  it('falls back to session.meta.cwd when header.cwd is absent (legacy shape)', () => {
-    const root = workspaceRootFromExec(execWith({ meta: { cwd: '/ws/meta' } }))
-    expect(root).toBe('/ws/meta')
+  it('falls back to process.cwd() when the exec carries no agent', () => {
+    expect(workspaceRootFromExec(undefined)).toBe(process.cwd())
+    expect(workspaceRootFromExec({})).toBe(process.cwd())
   })
 
-  it('falls back to process.cwd() when the exec carries no session cwd', () => {
-    const root = workspaceRootFromExec(execWith(undefined))
+  it('falls back to process.cwd() when the agent has no session', () => {
+    const root = workspaceRootFromExec(execWithSession(undefined))
     expect(root).toBe(process.cwd())
   })
 
-  it('returns null when header.cwd is present but empty', () => {
-    // 空 cwd 视为缺失:先回退 meta,再回退 process.cwd()。
-    const root = workspaceRootFromExec(execWith({ header: { cwd: '   ' } }))
+  it('falls back to process.cwd() when header.cwd is absent or empty', () => {
+    expect(workspaceRootFromExec(execWithSession({}))).toBe(process.cwd())
+    const root = workspaceRootFromExec(execWithSession({ cwd: '   ' }))
     expect(root).toBe(process.cwd())
   })
 })

@@ -240,7 +240,7 @@ describe('createCoAgentHubTools', () => {
     })
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_dispatch_task')!
     const result = (await tool.execute({ body: '任务' }, {
-      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+      agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
     const [url] = postMessage.mock.calls[0] as [string, RequestInit]
@@ -263,7 +263,7 @@ describe('createCoAgentHubTools', () => {
     })
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
     const result = (await tool.execute({ body: '任务' }, {
-      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+      agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
     const [url] = postMessage.mock.calls[0] as [string, RequestInit]
@@ -279,7 +279,7 @@ describe('createCoAgentHubTools', () => {
     )
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
     await expect(tool.execute({ body: '任务' }, {
-      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+      agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)).rejects.toThrow('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
   })
 
@@ -394,7 +394,7 @@ describe('createCoAgentHubTools', () => {
     })
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_list_tasks')!
     const result = (await tool.execute({}, {
-      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+      agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)) as Array<{ groupId: string }>
     expect(result).toEqual([])
     const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls as Array<[string]>
@@ -1119,7 +1119,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       const client = clientWith(() => Promise.resolve({ items: [group('g1', '群A')], total: 1 }))
       const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_workspace_instructions')!
       const result = (await tool.execute({}, {
-        agent: { session: { meta: { cwd: dir } } },
+        agent: { session: { header: { cwd: dir } } },
       } as never)) as Record<string, unknown>
       expect(result).toEqual({ groupId: 'g1', groupTitle: '群A', instructions: '# 指令\n\n指挥官职责\n' })
     } finally {
@@ -1133,7 +1133,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       const client = clientWith(() => Promise.resolve({ items: [], total: 0 }))
       const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_workspace_instructions')!
       const result = (await tool.execute({}, {
-        agent: { session: { meta: { cwd: dir } } },
+        agent: { session: { header: { cwd: dir } } },
       } as never)) as Record<string, unknown>
       expect(result).toEqual({ groupId: null, groupTitle: null, instructions: null })
     } finally {
@@ -1155,7 +1155,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       )
       const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
       const result = (await tool.execute({}, {
-        agent: { session: { meta: { cwd: dir } } },
+        agent: { session: { header: { cwd: dir } } },
       } as never)) as Record<string, unknown>
       expect(result).toEqual(expect.objectContaining({
         groupId: 'g1',
@@ -1180,7 +1180,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     )
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
     const result = (await tool.execute({}, {
-      agent: { session: { meta: { cwd: 'Y:\\dsh-coagenthub' } } },
+      agent: { session: { header: { cwd: 'Y:\\dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual(expect.objectContaining({
       groupId: 'g1',
@@ -1201,7 +1201,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     )
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
     const result = (await tool.execute({}, {
-      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub/' } } },
+      agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub/' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual(expect.objectContaining({
       groupId: 'g1',
@@ -1220,7 +1220,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     )
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_active_group')!
     const result = (await tool.execute({}, {
-      agent: { session: { meta: { cwd: 'c:/Projects/dsh-coagenthub' } } },
+      agent: { session: { header: { cwd: 'c:/Projects/dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual(expect.objectContaining({
       groupId: 'g2',
@@ -1258,7 +1258,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     )
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
     const result = (await tool.execute({}, {
-      agent: { session: { meta: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+      agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual(expect.objectContaining({ groupId: 'g9', groupTitle: 'dsh-coagenthub 插件开发' }))
   })
@@ -1272,10 +1272,10 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       )
       const tools = createCoAgentHubTools(client)
       const active = tools.find(t => t.name === 'coagenthub_get_active_group')!
-      expect(await active.execute({}, { agent: { session: { meta: { cwd: dir } } } } as never)).toBeNull()
+      expect(await active.execute({}, { agent: { session: { header: { cwd: dir } } } } as never)).toBeNull()
       const instructions = tools.find(t => t.name === 'coagenthub_get_workspace_instructions')!
       const result = (await instructions.execute({}, {
-        agent: { session: { meta: { cwd: dir } } },
+        agent: { session: { header: { cwd: dir } } },
       } as never)) as Record<string, unknown>
       expect(result).toEqual({ groupId: null, groupTitle: null, instructions: '非插件群指令' })
     } finally {
@@ -1294,7 +1294,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     )
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_workspace_instructions')!
     const result = (await tool.execute({}, {
-      agent: { session: { meta: { cwd: 'Y:\\dsh-coagenthub' } } },
+      agent: { session: { header: { cwd: 'Y:\\dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual({ groupId: 'g3', groupTitle: '映射群', instructions: null })
   })
