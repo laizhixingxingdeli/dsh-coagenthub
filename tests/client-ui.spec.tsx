@@ -9,6 +9,7 @@ import {
   activeGroupSessionKey,
   getCurrentDshSessionId,
   readActiveGroupId,
+  readSessionActiveGroupId,
   saveActiveGroupId,
   writeActiveGroupId,
 } from '../src/client-ui/workspace-status.ts'
@@ -256,7 +257,26 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     expect(select.textContent).toContain('Z:\\dsh-coagenthub')
   })
 
-  it('persists the selection to localStorage and mirrors it to the host settings', async () => {
+  it('默认选中「自动（按 cwd）」:无保存记录时不写存储也不镜像 host', async () => {
+    const fetchMock = workspacePanelFetchMock([PROJECTION])
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CoAgentHubPanel />)
+
+    const select = (await screen.findByLabelText('当前工作区')) as HTMLSelectElement
+    await waitFor(() => {
+      expect(select.querySelectorAll('option')).toHaveLength(2)
+    })
+    // 无 per-session 保存记录 → 默认「自动（按 cwd）」
+    expect(select.value).toBe('')
+    expect(select.textContent).toContain('自动（按 cwd）')
+    // 初始化不写 host activeGroupId
+    expect(fetchMock).not.toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+      method: 'PUT',
+    }))
+  })
+
+  it('手动选择群只更新草稿:点「保存」才写 per-session 并镜像 host', async () => {
     const fetchMock = workspacePanelFetchMock([PROJECTION])
     vi.stubGlobal('fetch', fetchMock)
 
@@ -268,6 +288,16 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     })
     fireEvent.change(select, { target: { value: 'g1' } })
 
+    // 未保存:下拉变了,但没有写入任何存储/镜像
+    expect(select.value).toBe('g1')
+    expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+      method: 'PUT',
+    }))
+
+    // 出现「保存工作区」按钮,点了才写 localStorage 并镜像 host
+    fireEvent.click(screen.getByRole('button', { name: '保存工作区' }))
+
     await waitFor(() => {
       expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBe('g1')
     })
@@ -278,8 +308,9 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     }))
   })
 
-  it('defaults the 任务 tab group selection to the active workspace', async () => {
-    localStorage.setItem(ACTIVE_GROUP_STORAGE_KEY, 'g1')
+  it('有保存记录时,任务面板默认选中该群', async () => {
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
+    localStorage.setItem(activeGroupSessionKey('session-a'), 'g1')
     vi.stubGlobal('fetch', workspacePanelFetchMock([PROJECTION]))
 
     render(<CoAgentHubPanel />)
@@ -287,6 +318,17 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     fireEvent.click(screen.getByRole('tab', { name: '任务' }))
     await waitFor(() => {
       expect((screen.getByLabelText('选择群组') as HTMLSelectElement).value).toBe('g1')
+    })
+  })
+
+  it('无保存记录时,任务面板不强制选群(保持空值)', async () => {
+    vi.stubGlobal('fetch', workspacePanelFetchMock([PROJECTION]))
+
+    render(<CoAgentHubPanel />)
+
+    fireEvent.click(screen.getByRole('tab', { name: '任务' }))
+    await waitFor(() => {
+      expect((screen.getByLabelText('选择群组') as HTMLSelectElement).value).toBe('')
     })
   })
 
@@ -303,7 +345,7 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     })
     expect(select.value).toBe('g1')
 
-    // 切换到 session-b:该会话没有记忆 → 回退全局(未设置 → 未选择)
+    // 切换到 session-b:该会话没有记忆 → 自动(按 cwd)
     localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-b' }))
     window.dispatchEvent(new Event('focus'))
 
@@ -317,6 +359,32 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     await waitFor(() => {
       expect(select.value).toBe('g1')
     })
+  })
+
+  it('未保存的手动选择在切换会话后丢弃,回到「自动（按 cwd）」', async () => {
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
+    vi.stubGlobal('fetch', workspacePanelFetchMock([PROJECTION]))
+
+    render(<CoAgentHubPanel />)
+
+    const select = (await screen.findByLabelText('当前工作区')) as HTMLSelectElement
+    await waitFor(() => {
+      expect(select.querySelectorAll('option')).toHaveLength(2)
+    })
+    // 手动选 g1,但不点保存
+    fireEvent.change(select, { target: { value: 'g1' } })
+    expect(select.value).toBe('g1')
+    expect(localStorage.getItem(activeGroupSessionKey('session-a'))).toBeNull()
+
+    // 切换到 session-b(无记忆):草稿丢弃,回到自动(按 cwd),且未写入任何记忆
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-b' }))
+    window.dispatchEvent(new Event('focus'))
+
+    await waitFor(() => {
+      expect(select.value).toBe('')
+    })
+    expect(localStorage.getItem(activeGroupSessionKey('session-a'))).toBeNull()
+    expect(localStorage.getItem(activeGroupSessionKey('session-b'))).toBeNull()
   })
 
   it('切换会话后设置页「当前工作区」同步显示新会话记忆的群名', async () => {
@@ -379,6 +447,24 @@ describe('dsh 会话隔离工作区记忆', () => {
     expect(getCurrentDshSessionId()).toBeNull()
     localStorage.setItem(SESSION_STORAGE_KEY, 'not-json')
     expect(getCurrentDshSessionId()).toBeNull()
+  })
+
+  it('readSessionActiveGroupId 只读当前会话 per-session 记忆,不回退全局 key', () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessionId: 'session-abc' }))
+    localStorage.setItem(ACTIVE_GROUP_STORAGE_KEY, 'g-global')
+
+    // 该会话没有记忆 → 面板默认「自动（按 cwd）」,不回退全局
+    expect(readSessionActiveGroupId()).toBeNull()
+
+    // 该会话有记忆 → 返回 per-session 值
+    localStorage.setItem(activeGroupSessionKey('session-abc'), 'g-per')
+    expect(readSessionActiveGroupId()).toBe('g-per')
+  })
+
+  it('无 sessionId 时 readSessionActiveGroupId 返回 null', () => {
+    expect(getCurrentDshSessionId()).toBeNull()
+    localStorage.setItem(ACTIVE_GROUP_STORAGE_KEY, 'g-global')
+    expect(readSessionActiveGroupId()).toBeNull()
   })
 
   it('有 sessionId 时读写 coagenthub.activeGroup.<sessionId>,同时保留全局 key', () => {

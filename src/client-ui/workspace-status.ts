@@ -81,6 +81,23 @@ export async function saveActiveGroupId(groupId: string | null): Promise<void> {
 }
 
 /**
+ * Read the current dsh session's per-session workspace memory ONLY — no
+ * global-key fallback. null when no session or no per-session entry; the
+ * panel's default is「自动(按 cwd)」in that case, so a stale global key must
+ * not re-select a group the user never saved for this session.
+ */
+export function readSessionActiveGroupId(): string | null {
+  try {
+    const sessionId = getCurrentDshSessionId()
+    if (sessionId === null) return null
+    const raw = localStorage.getItem(activeGroupSessionKey(sessionId))
+    return raw !== null && raw !== '' ? raw : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Read the remembered selection; null when absent or localStorage unusable.
  * Prefers the current dsh session's per-session key, falling back to the
  * global key (pre-session behavior) when no session or no per-session entry.

@@ -202,12 +202,20 @@ describe('CoAgentHubSettings 当前身份与工作区 status area', () => {
     expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('g-unknown')
   })
 
-  it('shows 未选择 when no active group is selected', async () => {
+  it('shows 自动（按 cwd） when no active group is saved', async () => {
     vi.stubGlobal('fetch', statusAreaFetchMock({}))
 
     render(<CoAgentHubSettings />)
 
-    expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('未选择')
+    expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('自动（按 cwd）')
+  })
+
+  it('面板传入空 activeGroupId(无保存记录)时显示「自动（按 cwd）」', async () => {
+    vi.stubGlobal('fetch', statusAreaFetchMock({}))
+
+    render(<CoAgentHubSettings activeGroupId="" />)
+
+    expect((await screen.findByLabelText('当前工作区群名')).textContent).toContain('自动（按 cwd）')
   })
 })
 

@@ -189,10 +189,11 @@ export function CoAgentHubSettings({ onSaved, activeGroupId: sessionActiveGroupI
   // 只读状态区数据:participantId 来自 fetchSettings();「当前工作区」优先用面板
   // 传入的会话记忆值(切换会话时面板已刷新),缺省时回退 fetchSettings 的全局
   // activeGroupId;群名在 workspace-status 的群列表里反查(找不到时回退显示 id)。
+  // 空值(无保存记录)=「自动(按 cwd)」,由 agent 工具按会话 cwd 解析。
   const displayGroupId = sessionActiveGroupId !== undefined ? sessionActiveGroupId : activeGroupId
   const activeWorkspace = workspaces.find(workspace => workspace.groupId === displayGroupId)
   const activeGroupTitle = displayGroupId.trim() === ''
-    ? null
+    ? '自动（按 cwd）'
     : activeWorkspace?.groupTitle ?? displayGroupId
 
   const handleCopyParticipantId = (): void => {
@@ -254,7 +255,7 @@ export function CoAgentHubSettings({ onSaved, activeGroupId: sessionActiveGroupI
         <div className={css.statusRow}>
           <span className={css.label}>当前工作区</span>
           <span className={css.statusValue} aria-label="当前工作区群名">
-            {activeGroupTitle === null ? '未选择' : activeGroupTitle}
+            {activeGroupTitle}
           </span>
         </div>
       </section>

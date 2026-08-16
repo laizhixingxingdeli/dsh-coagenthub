@@ -12,12 +12,12 @@ import css from './CoAgentHubPanel.module.css'
 import { CoAgentHubGroupList, DEFAULT_API_BASE } from './CoAgentHubGroupList.tsx'
 import { CoAgentHubTaskPanel } from './CoAgentHubTaskPanel.tsx'
 import { CoAgentHubExecutorsPanel } from './CoAgentHubExecutorsPanel.tsx'
-import { CoAgentHubSettings, fetchSettings } from './CoAgentHubSettings.tsx'
+import { CoAgentHubSettings } from './CoAgentHubSettings.tsx'
 import {
   fetchWorkspaceStatus,
   getCurrentDshSessionId,
   isWindowsPlatform,
-  readActiveGroupId,
+  readSessionActiveGroupId,
   saveActiveGroupId,
   writeActiveGroupId,
   type WorkspaceStatusView,
@@ -131,49 +131,47 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
   positionRef.current = position
   const dragStart = useRef<{ x: number; y: number; left: number; top: number } | null>(null)
 
-  // 当前虚拟工作区:localStorage 记住;host 设置镜像让 agent 侧工具可读。
-  const [activeGroupId, setActiveGroupId] = useState<string | null>(() => readActiveGroupId())
+  // 已保存的当前会话工作区(per-session 记忆);host 设置镜像让 agent 侧工具可读。
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(() => readSessionActiveGroupId())
+  // 下拉草稿:用户手动选择先只更新这里,点「保存」才写入 per-session 并镜像 host。
+  const [workspaceDraft, setWorkspaceDraft] = useState<string | null>(() => readSessionActiveGroupId())
   const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceStatusView | null>(null)
   // 上次看到的 dsh 会话 id;变化时重新读取该会话记忆的工作区。
   const lastSessionIdRef = useRef<string | null>(null)
 
   // 加载群投影状态;保存设置后(reloadKey)重新拉取,映射规则变化能反映到下拉。
+  // 工作区只读当前会话的 per-session 记忆:无记录时保持「自动(按 cwd)」(null),
+  // 不写 host activeGroupId。
   useEffect(() => {
     let alive = true
     fetchWorkspaceStatus().then(
       (view) => { if (alive) setWorkspaceStatus(view) },
       () => { if (alive) setWorkspaceStatus(null) },
     )
-    const saved = readActiveGroupId()
-    if (saved !== null) {
-      setActiveGroupId(saved)
-    } else {
-      fetchSettings().then(
-        (settings) => {
-          if (alive && settings.activeGroupId !== undefined && settings.activeGroupId !== '') {
-            setActiveGroupId(settings.activeGroupId)
-          }
-        },
-        () => {},
-      )
-    }
+    const saved = readSessionActiveGroupId()
+    setActiveGroupId(saved)
+    setWorkspaceDraft(saved)
     return () => { alive = false }
   }, [reloadKey])
 
   // dsh 会话切换检测:轻量轮询(1s)对比上次 sessionId;变化时重新读取该会话
   // 记忆的工作区并刷新状态。visibilitychange / focus 时无条件重读(即使会话
-  // 未变,也刷新为该会话最新的记忆值)。
+  // 未变,也刷新为该会话最新的记忆值)。未保存的草稿在切换/刷新时丢弃。
   useEffect(() => {
     const refreshForSession = (): void => {
       const sessionId = getCurrentDshSessionId()
       if (sessionId !== lastSessionIdRef.current) {
         lastSessionIdRef.current = sessionId
-        setActiveGroupId(readActiveGroupId())
+        const saved = readSessionActiveGroupId()
+        setActiveGroupId(saved)
+        setWorkspaceDraft(saved)
       }
     }
     const forceRefresh = (): void => {
       lastSessionIdRef.current = getCurrentDshSessionId()
-      setActiveGroupId(readActiveGroupId())
+      const saved = readSessionActiveGroupId()
+      setActiveGroupId(saved)
+      setWorkspaceDraft(saved)
     }
     refreshForSession()
     const timer = window.setInterval(refreshForSession, 1000)
@@ -191,10 +189,16 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
 
   const handleWorkspaceChange = (event: React.ChangeEvent<HTMLSelectElement>): void => {
     const next = event.target.value === '' ? null : event.target.value
-    setActiveGroupId(next)
-    writeActiveGroupId(next)
-    // host 镜像失败只影响 agent 侧工具,不阻塞本次选择。
-    void saveActiveGroupId(next).catch(() => {})
+    // 先只更新本地草稿;不写 localStorage,不镜像 host。
+    setWorkspaceDraft(next)
+  }
+
+  // 点「保存」才提交草稿:写入当前会话 per-session 记忆并镜像 host。
+  // host 镜像失败只影响 agent 侧工具,不阻塞本次保存。
+  const handleWorkspaceSave = (): void => {
+    writeActiveGroupId(workspaceDraft)
+    setActiveGroupId(workspaceDraft)
+    void saveActiveGroupId(workspaceDraft).catch(() => {})
   }
 
   // 拖拽调整大小:pointerdown 记录起点,pointermove 更新,pointerup 结束并持久化。
@@ -302,17 +306,29 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
         <select
           id="coagenthub-workspace-select"
           className={css.workspaceSelect}
-          value={activeGroupId ?? ''}
+          value={workspaceDraft ?? ''}
           onChange={handleWorkspaceChange}
           aria-label="当前工作区"
         >
-          <option value="">未选择</option>
+          {/* 空值 = 自动(按 cwd):默认选项,未保存记录时永远选中它。 */}
+          <option value="">自动（按 cwd）</option>
           {(workspaceStatus?.workspaces ?? []).map((workspace) => (
             <option key={workspace.groupId} value={workspace.groupId}>
               {workspace.groupTitle}({workspace.winPath ?? workspace.macPath})
             </option>
           ))}
         </select>
+        {/* 草稿与已保存值不一致时出现「保存」:点了才写入 per-session 并镜像 host。 */}
+        {workspaceDraft !== activeGroupId && (
+          <button
+            type="button"
+            className={css.workspaceSave}
+            onClick={handleWorkspaceSave}
+            aria-label="保存工作区"
+          >
+            保存
+          </button>
+        )}
         {!isWindowsPlatform() && <span className={css.workspaceNote}>自动映射仅 Windows 支持</span>}
       </div>
       <div className={css.body}>

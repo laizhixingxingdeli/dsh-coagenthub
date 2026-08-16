@@ -113,6 +113,24 @@
   background: var(--dsw-alias-bg-base);
 }
 
+/* 「当前工作区」手动选择后的保存按钮:草稿与已保存值不一致时才出现。 */
+.workspaceSave {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary, #1f2328);
+  background: var(--dsw-alias-interactive-bg-hover);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.workspaceSave:hover {
+  border-color: var(--dsw-alias-border-l3);
+}
+
 .workspaceNote {
   flex: none;
   font-size: 11px;
