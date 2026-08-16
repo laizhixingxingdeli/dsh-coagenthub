@@ -928,6 +928,18 @@ export function createCoAgentHubTools(
             outputTail: task.diffSummary?.outputTail ?? null,
           }
         } catch (error) {
+          // 单任务接口 404/405 后 fallback 到 listTasks 仍找不到该 id 时,client.getTask
+          // 会抛出 bodySummary 为 "task <taskId> not found in group <groupId>" 的 404。
+          // 这种情况多半是用户把 dispatch_task 返回的 messageId 误当 taskId,给出友好提示。
+          if (
+            error instanceof CoAgentHubError &&
+            error.status === 404 &&
+            error.bodySummary.startsWith(`task ${args.taskId} not found in group`)
+          ) {
+            throw new Error(
+              `任务不存在或 id 无效(404): ${args.taskId}。如果这是 coagenthub_dispatch_task 返回的 messageId，它不是 taskId；请用 coagenthub_list_tasks 查询真实任务 id。`,
+            )
+          }
           throwToolError(error, '任务或群组不存在(404)')
         }
       },

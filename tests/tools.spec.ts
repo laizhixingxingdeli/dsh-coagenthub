@@ -844,6 +844,27 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(result.outputTail).toBe('tail')
   })
 
+  it('get_task throws a friendly hint when the id is not a real task id (404 after listTasks fallback)', async () => {
+    // 模拟单任务接口 404,fallback listTasks 也找不到该 id:此时应提示用户
+    // dispatch_task 返回的是 messageId 而非 taskId,引导用 list_tasks 查询真实任务 id。
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).includes('/tasks/ghost')) {
+        return Promise.resolve(new Response('{"error":"task not found"}', { status: 404 }))
+      }
+      if (String(url).includes('/tasks')) {
+        return Promise.resolve([])
+      }
+      return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_task')!
+    const error = await execute(tool, { groupId: 'g1', taskId: 'ghost' }).catch(err => err)
+    expect(error).toBeInstanceOf(Error)
+    const message = String((error as Error).message)
+    expect(message).toContain('任务不存在或 id 无效(404): ghost')
+    expect(message).toContain('coagenthub_dispatch_task 返回的 messageId，它不是 taskId')
+    expect(message).toContain('coagenthub_list_tasks 查询真实任务 id')
+  })
+
   it('update_task updates the brief and returns the updated task summary', async () => {
     const task = {
       id: 't1',
