@@ -216,6 +216,23 @@ describe('CoAgentHubTaskPanel', () => {
     expect(within(detail).getAllByText('alpha')).toHaveLength(2)
   })
 
+  it('shows the process output when outputTail is at the task top level (server refactor position)', async () => {
+    // 服务端重构后 outputTail 挂在任务顶层,diffSummary 里不再有它;面板应兼容读取。
+    const withTopLevelOutput = task({
+      diffSummary: { summary: '提交: abc', hash: null, error: null, outputTail: null },
+      outputTail: 'top-level-line-1\ntop-level-line-2',
+    })
+    vi.stubGlobal('fetch', groupFetchMock([withTopLevelOutput]))
+
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+    fireEvent.click(await screen.findByRole('button', { name: /提交: abc/ }))
+
+    const terminal = within(screen.getByTestId('task-detail')).getByLabelText('过程输出')
+    expect(terminal.textContent).toContain('top-level-line-1')
+    expect(terminal.textContent).toContain('top-level-line-2')
+  })
+
   it('toggles the terminal follow-scroll button', async () => {
     vi.stubGlobal('fetch', groupFetchMock([task({ diffSummary: { summary: '', hash: null, error: null, outputTail: 'some log' } })]))
 
@@ -772,6 +789,7 @@ describe('fetchTasks normalization', () => {
       executorParticipantId: '',
       brief: '',
       diffSummary: null,
+      outputTail: null,
       attempts: [],
       createdAt: '2026-08-14T10:00:00Z',
       updatedAt: '2026-08-14T10:00:00Z',
@@ -835,6 +853,7 @@ describe('fetchTasks normalization', () => {
       executorParticipantId: '',
       brief: '',
       diffSummary: null,
+      outputTail: null,
       attempts: [],
       createdAt: '',
       updatedAt: '',

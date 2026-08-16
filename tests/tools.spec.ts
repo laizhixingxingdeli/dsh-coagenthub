@@ -844,6 +844,31 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(result.outputTail).toBe('tail')
   })
 
+  it('get_task returns outputTail from the task top level (server refactor position)', async () => {
+    // 服务端重构后 outputTail 挂在任务顶层,diffSummary 里不再有它;工具应兼容读取。
+    const task = {
+      id: 't1',
+      groupId: 'g1',
+      status: 'running',
+      executorParticipantId: 'e-atom',
+      brief: '实现登录页',
+      retryCount: 0,
+      attempts: [],
+      diffSummary: { summary: null, hash: null, error: null },
+      outputTail: 'top-level-tail-line-1\ntop-level-tail-line-2',
+      createdAt: 'c',
+      updatedAt: 'u',
+    }
+    const client = clientWith((url: string | URL | Request) => {
+      if (String(url).includes('/tasks/t1')) return Promise.resolve(task)
+      return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_task')!
+    const result = (await execute(tool, { groupId: 'g1', taskId: 't1' })) as Record<string, unknown>
+    expect(result.diffSummary).toEqual({ summary: null, hash: null, error: null })
+    expect(result.outputTail).toBe('top-level-tail-line-1\ntop-level-tail-line-2')
+  })
+
   it('get_task throws a friendly hint when the id is not a real task id (404 after listTasks fallback)', async () => {
     // 模拟单任务接口 404,fallback listTasks 也找不到该 id:此时应提示用户
     // dispatch_task 返回的是 messageId 而非 taskId,引导用 list_tasks 查询真实任务 id。

@@ -120,6 +120,8 @@ export interface Task {
   checkpointRef: string | null
   retryCount: number
   diffSummary: TaskDiffSummary | null
+  /** Process output tail; server may also return it at the task top level. */
+  outputTail?: string | null
   attempts?: TaskAttempt[]
   createdAt: string
   updatedAt: string

@@ -56,6 +56,8 @@ export interface CoAgentHubTaskView {
   } | null
   /** 执行历史。服务端任务列表原始行不含该字段,经 `normalizeTaskView` 补齐为 `[]`。 */
   attempts?: CoAgentHubTaskAttempt[]
+  /** 实时输出尾部。服务端重构后可能直接挂在任务顶层(旧位置在 diffSummary.outputTail)。 */
+  outputTail?: string | null
   createdAt: string
   updatedAt: string
   retryCount: number
@@ -71,6 +73,7 @@ export interface CoAgentHubTaskInput {
   brief?: string
   diffSummary?: CoAgentHubTaskView['diffSummary'] | null
   attempts?: CoAgentHubTaskAttempt[] | null
+  outputTail?: string | null
   createdAt?: string
   updatedAt?: string
   retryCount?: number
@@ -86,6 +89,7 @@ export function normalizeTaskView(raw: CoAgentHubTaskInput): CoAgentHubTaskView 
     executorParticipantId: raw.executorParticipantId ?? '',
     brief: raw.brief ?? '',
     diffSummary: raw.diffSummary ?? null,
+    outputTail: raw.outputTail ?? null,
     attempts: (raw.attempts ?? []).map((attempt) => ({
       n: attempt.n ?? 0,
       startedAt: attempt.startedAt ?? '',
@@ -515,7 +519,7 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
               const expanded = expandedId === task.id
               const attempts = task.attempts ?? []
               const diffError = task.diffSummary?.error ?? null
-              const diffOutput = task.diffSummary?.outputTail ?? null
+              const diffOutput = task.diffSummary?.outputTail ?? task.outputTail ?? null
               const fullBrief = (task.brief ?? '').trim()
               const report = parseFinalReport(task.diffSummary?.summary, task.diffSummary?.hash)
               const hasReport = report.提交 !== null || report.测试 !== null || report.汇报 !== null || report.遗留 !== null

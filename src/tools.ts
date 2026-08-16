@@ -925,7 +925,7 @@ export function createCoAgentHubTools(
                   hash: task.diffSummary.hash ?? null,
                   error: task.diffSummary.error ?? null,
                 },
-            outputTail: task.diffSummary?.outputTail ?? null,
+            outputTail: task.diffSummary?.outputTail ?? task.outputTail ?? null,
           }
         } catch (error) {
           // 单任务接口 404/405 后 fallback 到 listTasks 仍找不到该 id 时,client.getTask
