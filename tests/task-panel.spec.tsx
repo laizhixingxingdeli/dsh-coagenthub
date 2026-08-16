@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
@@ -8,6 +10,8 @@ import {
   attemptTimeline,
   capOutput,
   diffTaskStatuses,
+  executorLabel,
+  fetchParticipants,
   fetchTasks,
   formatUpdatedAt,
   normalizeTaskView,
@@ -26,6 +30,7 @@ function task(overrides: Partial<CoAgentHubTaskView> = {}): CoAgentHubTaskView {
     id: 't1',
     status: 'done',
     executorKey: 'atomcode',
+    executorParticipantId: '',
     brief: '实现登录页',
     diffSummary: { summary: '', hash: 'abc123456789', error: null, outputTail: null },
     attempts: [],
@@ -91,6 +96,42 @@ describe('CoAgentHubTaskPanel', () => {
     const runningBadge = screen.getByText('执行中')
     expect(runningBadge.getAttribute('data-status')).toBe('running')
     expect(runningBadge.querySelector('[class*="pulse"]')).toBeTruthy()
+  })
+
+  it('styles the running badge blue in the CSS module', () => {
+    // running 状态必须使用蓝色样式(需求 1):直接校验 CSS module 中的规则。
+    const cssSource = readFileSync(resolve(process.cwd(), 'src/client-ui/CoAgentHubTaskPanel.module.css'), 'utf8')
+    const runningRule = cssSource.match(/\.badge\[data-status='running'\]\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(runningRule).toContain('#0969da')
+  })
+
+  it('does not repeat the task status inside the expanded detail', async () => {
+    vi.stubGlobal('fetch', groupFetchMock([task({ id: 't1', status: 'running' })]))
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+
+    fireEvent.click(await screen.findByRole('button', { name: /实现登录页/ }))
+    const detail = screen.getByTestId('task-detail')
+
+    // 列表行保留状态徽标,详情内不再重复显示任务状态
+    expect(screen.getByText('执行中')).toBeTruthy()
+    expect(within(detail).queryByText('执行中')).toBeNull()
+    expect(detail.querySelector('[class*="badge"]')).toBeNull()
+  })
+
+  it('shows the executor as the participant name, not the executorKey', async () => {
+    const winTask = task({
+      id: 't-win',
+      executorKey: 'win-hermes',
+      executorParticipantId: 'e-win',
+    })
+    vi.stubGlobal('fetch', groupFetchMock([winTask], [{ id: 'e-win', name: 'Win Hermes' }]))
+    render(<CoAgentHubTaskPanel />)
+    await selectGroup('g1')
+
+    // 参与者映射生效:显示 Win Hermes,不再显示 win-hermes
+    expect(await screen.findByText('Win Hermes')).toBeTruthy()
+    expect(screen.queryByText('win-hermes')).toBeNull()
   })
 
   it('expands a row into 任务书 + attempt timeline + final report + terminal output', async () => {
@@ -260,6 +301,9 @@ describe('CoAgentHubTaskPanel', () => {
           { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
         ])))
       }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse([]))
+      }
       return Promise.reject(new TypeError('Failed to fetch'))
     }))
 
@@ -314,6 +358,9 @@ describe('CoAgentHubTaskPanel', () => {
           { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
         ])))
       }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse([]))
+      }
       return new Promise<Response>((resolve) => { resolvers.push(resolve) })
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -333,6 +380,9 @@ describe('CoAgentHubTaskPanel', () => {
         return Promise.resolve(jsonResponse(groups([
           { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
         ])))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse([]))
       }
       return new Promise<Response>((resolve) => { resolvers.push(resolve) })
     })
@@ -361,6 +411,9 @@ describe('CoAgentHubTaskPanel', () => {
         return Promise.resolve(jsonResponse(groups([
           { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
         ])))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse([]))
       }
       return new Promise<Response>((resolve) => { resolvers.push(resolve) })
     })
@@ -393,6 +446,9 @@ describe('CoAgentHubTaskPanel', () => {
           { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
         ])))
       }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse([]))
+      }
       tasksCall += 1
       if (tasksCall === 1) return Promise.resolve(jsonResponse([task()]))
       return Promise.reject(new TypeError('Failed to fetch'))
@@ -423,6 +479,9 @@ describe('CoAgentHubTaskPanel', () => {
           { id: 'g2', title: '第二个群组', status: 'active' },
         ])))
       }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse([]))
+      }
       return new Promise<Response>((resolve) => { resolvers.push(resolve) })
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -449,6 +508,9 @@ describe('CoAgentHubTaskPanel', () => {
           { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
           { id: 'g2', title: '第二个群组', status: 'active' },
         ])))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse([]))
       }
       tasksCall += 1
       if (tasksCall === 1) return Promise.resolve(jsonResponse([task()]))
@@ -515,6 +577,9 @@ describe('CoAgentHubTaskPanel reminders', () => {
         return Promise.resolve(jsonResponse(groups([
           { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
         ])))
+      }
+      if (url.includes('/participants')) {
+        return Promise.resolve(jsonResponse([]))
       }
       tasksCall += 1
       return Promise.resolve(jsonResponse([task({ id: 't1', status: tasksCall === 1 ? initialStatus : nextStatus })]))
@@ -679,6 +744,25 @@ describe('CoAgentHubTaskPanel helpers', () => {
     expect(statusLabel('unknown-status')).toBe('unknown-status')
   })
 
+  it('resolves the executor label to the participant name when a map is available', () => {
+    const nameById = new Map([['e-win', 'Win Hermes']])
+    // 参与者映射生效,优先于 executorKey
+    expect(executorLabel(task({ executorKey: 'win-hermes', executorParticipantId: 'e-win' }), nameById)).toBe('Win Hermes')
+    // 无映射时回退 executorKey;executorLabel 字段最优先
+    expect(executorLabel(task({ executorKey: 'win-hermes', executorParticipantId: 'e-win' }))).toBe('win-hermes')
+    expect(executorLabel(task({ executorKey: 'atomcode', executorLabel: 'AtomCode 执行器', executorParticipantId: 'e-atom' }), nameById)).toBe('AtomCode 执行器')
+  })
+
+  it('fetchParticipants maps participant ids to names', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse([
+      { id: 'e-win', name: 'Win Hermes' },
+      { id: 'e-atom', name: 'AtomCode 执行器' },
+    ])))
+    const names = await fetchParticipants(DEFAULT_API_BASE)
+    expect(names.get('e-win')).toBe('Win Hermes')
+    expect(names.get('e-atom')).toBe('AtomCode 执行器')
+  })
+
   it('renders the attempt timeline with error + short hash', () => {
     const timeline = attemptTimeline([
       { n: 1, startedAt: 'x', endedAt: null, status: 'failed', error: 'exit 1', summary: null, hash: null },
@@ -732,6 +816,7 @@ describe('fetchTasks normalization', () => {
       status: 'done',
       executorKey: '',
       executorLabel: '',
+      executorParticipantId: '',
       brief: '',
       diffSummary: null,
       attempts: [],
@@ -794,6 +879,7 @@ describe('fetchTasks normalization', () => {
       status: 'queued',
       executorKey: '',
       executorLabel: '',
+      executorParticipantId: '',
       brief: '',
       diffSummary: null,
       attempts: [],

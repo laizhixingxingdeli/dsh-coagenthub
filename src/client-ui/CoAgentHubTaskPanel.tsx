@@ -49,6 +49,8 @@ export interface CoAgentHubTaskView {
   status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | string
   executorKey: string
   executorLabel?: string
+  /** 参与者 id,用于把执行者解析为参与者名称(如 AtomCode 执行器)。 */
+  executorParticipantId: string
   brief: string
   diffSummary: {
     summary: string | null
@@ -69,6 +71,7 @@ export interface CoAgentHubTaskInput {
   status: string
   executorKey?: string
   executorLabel?: string
+  executorParticipantId?: string
   brief?: string
   diffSummary?: CoAgentHubTaskView['diffSummary'] | null
   attempts?: CoAgentHubTaskAttempt[] | null
@@ -84,6 +87,7 @@ export function normalizeTaskView(raw: CoAgentHubTaskInput): CoAgentHubTaskView 
     status: raw.status,
     executorKey: raw.executorKey ?? '',
     executorLabel: raw.executorLabel ?? '',
+    executorParticipantId: raw.executorParticipantId ?? '',
     brief: raw.brief ?? '',
     diffSummary: raw.diffSummary ?? null,
     attempts: (raw.attempts ?? []).map((attempt) => ({
@@ -127,9 +131,14 @@ export function statusLabel(status: string): string {
   return status
 }
 
-/** Executor display label: executorLabel when present, else executorKey. */
-export function executorLabel(task: CoAgentHubTaskView): string {
-  return (task.executorLabel !== undefined && task.executorLabel !== '') ? task.executorLabel : task.executorKey
+/** Executor display label: executorLabel, then participant name, else executorKey. */
+export function executorLabel(task: CoAgentHubTaskView, nameById?: ReadonlyMap<string, string>): string {
+  if (task.executorLabel !== undefined && task.executorLabel !== '') return task.executorLabel
+  if (nameById !== undefined && task.executorParticipantId !== '') {
+    const name = nameById.get(task.executorParticipantId)
+    if (name !== undefined && name !== '') return name
+  }
+  return task.executorKey
 }
 
 /** Collapsed row summary: diffSummary.summary first, else brief, capped. */
@@ -162,6 +171,7 @@ export function diffTaskStatuses(
   reminded: Set<string>,
   groupId: string,
   tasks: CoAgentHubTaskView[],
+  nameById?: ReadonlyMap<string, string>,
 ): CoAgentHubTaskReminder[] {
   const reminders: CoAgentHubTaskReminder[] = []
   const firstRound = !baselineGroups.has(groupId)
@@ -183,7 +193,7 @@ export function diffTaskStatuses(
         key: `${key}:${task.status}`,
         taskId: task.id,
         status: task.status,
-        executor: executorLabel(task),
+        executor: executorLabel(task, nameById),
         summary: taskSummary(task),
       })
     }
@@ -269,6 +279,18 @@ export async function fetchTasks(apiBase: string, groupId: string): Promise<CoAg
   return []
 }
 
+/** Fetch `{apiBase}/participants` into an id→name map, throwing on failure. */
+export async function fetchParticipants(apiBase: string): Promise<Map<string, string>> {
+  const response = await fetch(`${apiBase}/participants`)
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`HTTP ${response.status}${body !== '' ? `: ${body.slice(0, 200)}` : ''}`)
+  }
+  const data = (await response.json()) as { id: string; name: string }[] | { items?: { id: string; name: string }[] } | null
+  const list = Array.isArray(data) ? data : data !== null && typeof data === 'object' && Array.isArray(data.items) ? data.items : []
+  return new Map(list.map(participant => [participant.id, participant.name]))
+}
+
 /** Same-origin URL of the full task output (opened in a new browser tab). */
 export function rawOutputUrl(apiBase: string, taskId: string): string {
   return `${apiBase}/raw/${encodeURIComponent(taskId)}`
@@ -334,6 +356,9 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
   const [groups, setGroups] = useState<CoAgentHubGroupView[]>([])
   const [groupsError, setGroupsError] = useState<string | null>(null)
   const [groupId, setGroupId] = useState('')
+  // 参与者 id → 名称,用于把执行者显示为参与者名称(如 AtomCode 执行器)。
+  const [participantNames, setParticipantNames] = useState<ReadonlyMap<string, string>>(new Map())
+  const participantNamesRef = useRef<ReadonlyMap<string, string>>(participantNames)
   const [state, setState] = useState<LoadState>({ kind: 'idle' })
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -366,6 +391,20 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
     return () => { alive = false }
   }, [apiBase])
 
+  // Load the participant id → name map once; executor display resolves through
+  // it (executorLabel → participant name → executorKey). 加载失败仅回退显示
+  // executorKey,不阻塞任务列表。
+  useEffect(() => {
+    let alive = true
+    fetchParticipants(apiBase).then(
+      (names) => { if (alive) { participantNamesRef.current = names; setParticipantNames(names) } },
+      (error: unknown) => {
+        if (alive) console.warn(`[CoAgentHubTaskPanel] 参与者列表加载失败,执行者回退显示 executorKey:${error instanceof Error ? error.message : String(error)}`)
+      },
+    )
+    return () => { alive = false }
+  }, [apiBase])
+
   // 虚拟工作区选中变化时默认切换群选择;用户手动选择不被覆盖。
   useEffect(() => {
     if (defaultGroupId !== undefined && defaultGroupId !== '' && defaultGroupId !== groupId) {
@@ -390,7 +429,7 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
           setState({ kind: 'ready', tasks })
           // 每轮刷新后对比上一轮 taskId -> status,新变为 done/failed/cancelled 的任务生成提醒。
           const fresh = diffTaskStatuses(
-            baselineGroupsRef.current, prevStatusRef.current, remindedRef.current, groupId, tasks,
+            baselineGroupsRef.current, prevStatusRef.current, remindedRef.current, groupId, tasks, participantNamesRef.current,
           )
           if (fresh.length > 0) {
             setReminders((prev) => [...prev, ...fresh])
@@ -566,7 +605,7 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
                           {task.status === 'running' && <span className={css.pulse} />}
                           {statusLabel(task.status)}
                         </span>
-                        <span className={css.executor}>{executorLabel(task)}</span>
+                        <span className={css.executor}>{executorLabel(task, participantNames)}</span>
                         <span className={css.time}>{formatUpdatedAt(task.updatedAt)}</span>
                       </span>
                       <span className={css.summary}>{taskSummary(task)}</span>
@@ -575,11 +614,7 @@ export function CoAgentHubTaskPanel({ apiBase = DEFAULT_API_BASE, onDetailChange
                   {expanded && (
                     <div className={css.detail} data-testid="task-detail">
                       <div className={css.detailHeader}>
-                        <span className={css.badge} data-status={task.status}>
-                          {task.status === 'running' && <span className={css.pulse} />}
-                          {statusLabel(task.status)}
-                        </span>
-                        <span className={css.executor}>{executorLabel(task)}</span>
+                        <span className={css.executor}>{executorLabel(task, participantNames)}</span>
                         <div className={css.detailActions}>
                           <button
                             type="button"

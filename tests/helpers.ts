@@ -17,14 +17,18 @@ export function groups(items: unknown[]): { items: unknown[]; total: number } {
 
 /**
  * Per-test fetch mock: the group-list URL returns a fixed one-group fixture,
- * every other URL returns `tasks` (default: no tasks).
+ * the participants URL returns `participants` (default: none), and every other
+ * URL returns `tasks` (default: no tasks).
  */
-export function groupFetchMock(tasks: unknown[] = []) {
+export function groupFetchMock(tasks: unknown[] = [], participants: unknown[] = []) {
   return vi.fn().mockImplementation((url: string) => {
     if (url.includes('/groups?')) {
       return Promise.resolve(jsonResponse(groups([
         { id: 'g1', title: 'dsh-coagenthub 插件开发', status: 'active' },
       ])))
+    }
+    if (url.includes('/participants')) {
+      return Promise.resolve(jsonResponse(participants))
     }
     return Promise.resolve(jsonResponse(tasks))
   })
