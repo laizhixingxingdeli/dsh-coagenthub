@@ -111,8 +111,7 @@ export class TaskWatcher {
     const time = new Date().toISOString()
     switch (frame.type) {
       case 'group_message': {
-        if (groupId === undefined) return
-        this.deliver.deliver({ type: 'message.received', groupId, time })
+        // 群消息不属于需要 agent 处理的终态事件,不再投递 message.received。
         return
       }
       case 'task_stall_alert': {
@@ -133,10 +132,9 @@ export class TaskWatcher {
         if (groupId === undefined || typeof frame.taskId !== 'string') return
         const status = typeof frame.status === 'string' ? frame.status : undefined
         if (status === undefined) return
-        // queued 是任务派发后的默认状态,推送无信息量,直接跳过。
-        if (status === 'queued') return
-        // task_output 帧多为流式输出,仅对终态/停滞变化发通知,避免刷屏。
-        if (frame.type === 'task_output' && !['done', 'failed', 'stalled', 'cancelled'].includes(status)) return
+        // 只对终态(done/failed/stalled)投递通知;queued/running 等中间状态与
+        // task_output 流式输出无信息量,直接跳过。
+        if (status !== 'done' && status !== 'failed' && status !== 'stalled') return
         this.deliver.deliver({
           type: notificationTypeFor(status),
           groupId,
@@ -174,7 +172,9 @@ export class TaskWatcher {
       if (prev === task.status) continue
       this.previousStatuses.set(task.id, task.status)
       if (prev === undefined) continue // 首次见到:仅记录基线,不通知。
-      if (task.status === 'queued') continue // 回到 queued 不产生通知噪音。
+      // 只对终态(done/failed/stalled)变化投递通知;queued/running 等中间状态
+      // 只更新基线,不投递。
+      if (task.status !== 'done' && task.status !== 'failed' && task.status !== 'stalled') continue
       const summary = task.diffSummary?.summary ?? task.diffSummary?.error
       this.deliver.deliver({
         type: notificationTypeFor(task.status),

@@ -92,12 +92,10 @@ describe('formatNotification', () => {
 })
 
 describe('TaskWatcher.handleFrame', () => {
-  it('delivers a message.received notification for group_message frames', () => {
+  it('does not deliver a notification for group_message frames', () => {
     const { watcher, delivered } = makeWatcher()
     watcher.handleFrame({ type: 'group_message', groupId: 'g1' })
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({ type: 'message.received', groupId: 'g1' })
-    expect(delivered[0]!.time).toBeTruthy()
+    expect(delivered).toHaveLength(0)
   })
 
   it('delivers a task.stalled notification for task_stall_alert frames', () => {
@@ -108,15 +106,16 @@ describe('TaskWatcher.handleFrame', () => {
     expect(delivered[0]!.executorName).toBe('AtomCode 执行器')
   })
 
-  it('maps task_status_changed frames to completed / failed / status_changed', () => {
+  it('delivers only terminal statuses on task_status_changed frames', () => {
     const { watcher, delivered } = makeWatcher()
     watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'done', summary: '完成' })
     watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't2', status: 'failed' })
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'running' })
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'stalled' })
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't4', status: 'running' })
     expect(delivered.map(notification => notification.type)).toEqual([
       'task.completed',
       'task.failed',
-      'task.status_changed',
+      'task.stalled',
     ])
     expect(delivered[0]!.summary).toBe('完成')
   })
@@ -138,16 +137,13 @@ describe('TaskWatcher.handleFrame', () => {
     expect(delivered).toHaveLength(0)
   })
 
-  it('skips queued status on task_status_changed frames but delivers running/done', () => {
+  it('skips queued/running status on task_status_changed frames but delivers done', () => {
     const { watcher, delivered } = makeWatcher()
     watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'queued' })
-    expect(delivered).toHaveLength(0)
     watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't2', status: 'running' })
+    expect(delivered).toHaveLength(0)
     watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'done' })
-    expect(delivered.map(notification => notification.type)).toEqual([
-      'task.status_changed',
-      'task.completed',
-    ])
+    expect(delivered.map(notification => notification.type)).toEqual(['task.completed'])
   })
 
   it('skips queued status on task_output frames', () => {
@@ -158,7 +154,7 @@ describe('TaskWatcher.handleFrame', () => {
 })
 
 describe('TaskWatcher.pollOnce', () => {
-  it('records a baseline on first poll and notifies only on transitions', async () => {
+  it('records a baseline on first poll and notifies only on terminal transitions', async () => {
     const tasks: Array<Record<string, unknown>> = [
       { id: 't1', groupId: 'g1', status: 'queued', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' },
     ]
@@ -169,20 +165,18 @@ describe('TaskWatcher.pollOnce', () => {
     expect(delivered).toHaveLength(0)
 
     tasks[0] = { ...tasks[0]!, status: 'running' }
-    await watcher.pollOnce()
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({ type: 'task.status_changed', groupId: 'g1', taskId: 't1', status: 'running' })
-    expect(delivered[0]!.executorName).toBe('AtomCode 执行器')
+    await watcher.pollOnce() // 中间态:只更新基线,不通知
+    expect(delivered).toHaveLength(0)
 
     tasks[0] = { ...tasks[0]!, status: 'done', diffSummary: { summary: '完成', hash: 'h', error: null } }
     await watcher.pollOnce()
-    expect(delivered).toHaveLength(2)
-    expect(delivered[1]).toMatchObject({ type: 'task.completed', status: 'done' })
-    expect(delivered[1]!.summary).toBe('完成')
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done' })
+    expect(delivered[0]!.summary).toBe('完成')
 
     // 状态不变:不再通知
     await watcher.pollOnce()
-    expect(delivered).toHaveLength(2)
+    expect(delivered).toHaveLength(1)
   })
 
   it('does nothing without an active group', async () => {
@@ -193,7 +187,7 @@ describe('TaskWatcher.pollOnce', () => {
     expect(delivered).toHaveLength(0)
   })
 
-  it('does not notify on running→queued but notifies on queued→running', async () => {
+  it('does not notify on intermediate status changes (running/queued) but notifies on terminal ones', async () => {
     const tasks: Array<Record<string, unknown>> = [
       { id: 't1', groupId: 'g1', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' },
     ]
@@ -208,9 +202,29 @@ describe('TaskWatcher.pollOnce', () => {
     expect(delivered).toHaveLength(0)
 
     tasks[0] = { ...tasks[0]!, status: 'running' }
-    await watcher.pollOnce() // queued→running:正常通知
+    await watcher.pollOnce() // queued→running:不通知
+    expect(delivered).toHaveLength(0)
+
+    tasks[0] = { ...tasks[0]!, status: 'failed' }
+    await watcher.pollOnce() // running→failed:终态,通知
     expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({ type: 'task.status_changed', groupId: 'g1', taskId: 't1', status: 'running' })
+    expect(delivered[0]).toMatchObject({ type: 'task.failed', groupId: 'g1', taskId: 't1', status: 'failed' })
+  })
+
+  it('notifies on stalled transitions', async () => {
+    const tasks: Array<Record<string, unknown>> = [
+      { id: 't1', groupId: 'g1', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' },
+    ]
+    const client = clientStub({ tasks, participants: [{ id: 'e1', name: 'AtomCode 执行器' }] })
+    const { watcher, delivered } = makeWatcher({ client })
+
+    await watcher.pollOnce() // 基线:running,不通知
+    expect(delivered).toHaveLength(0)
+
+    tasks[0] = { ...tasks[0]!, status: 'stalled' }
+    await watcher.pollOnce() // running→stalled:终态,通知
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({ type: 'task.stalled', groupId: 'g1', taskId: 't1', status: 'stalled' })
   })
 
   it('swallows client failures silently', async () => {
