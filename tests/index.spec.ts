@@ -136,4 +136,46 @@ describe('resolveGroupIdForCwd', () => {
     expect(resolveGroupIdForCwd(null, groups, undefined)).toBeNull()
     expect(resolveGroupIdForCwd('   ', groups, undefined)).toBeNull()
   })
+
+  it('prefers the session per-session mapping over the cwd-matched group', () => {
+    const settings = { sessionActiveGroups: { 'session-a': 'g1' } }
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/other-repo', groups, settings, 'session-a')).toBe('g1')
+  })
+
+  it('resolves the session per-session mapping even when the session has no usable cwd', () => {
+    const settings = { sessionActiveGroups: { 'session-a': 'g2' } }
+    expect(resolveGroupIdForCwd(undefined, groups, settings, 'session-a')).toBe('g2')
+    expect(resolveGroupIdForCwd(null, groups, settings, 'session-a')).toBe('g2')
+    expect(resolveGroupIdForCwd('   ', groups, settings, 'session-a')).toBe('g2')
+  })
+
+  it('falls back to the cwd-matched group when the session per-session mapping no longer exists', () => {
+    const settings = { sessionActiveGroups: { 'session-a': 'ghost' } }
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, settings, 'session-a')).toBe('g1')
+  })
+
+  it('a session without a mapping ignores the global activeGroupId (no cross-session pollution)', () => {
+    const settings = {
+      activeGroupId: 'g1',
+      sessionActiveGroups: { 'session-a': 'g2' },
+    }
+    // session-a 有映射 → g2
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, settings, 'session-a')).toBe('g2')
+    // session-b 无映射:cwd 命中 g1,但绝不回退全局 activeGroupId → 按 cwd 返回 g1;
+    // 若 cwd 未命中,也不该返回全局 g1。
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/unmapped', groups, settings, 'session-b')).toBeNull()
+  })
+
+  it('session with an empty mapping entry falls back to cwd (cleared)', () => {
+    const settings = { sessionActiveGroups: { 'session-a': '' } }
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, settings, 'session-a')).toBe('g1')
+    expect(resolveGroupIdForCwd(undefined, groups, settings, 'session-a')).toBeNull()
+  })
+
+  it('keeps the global activeGroupId compat fallback when no sessionId is provided', () => {
+    const settings = { activeGroupId: 'g2', sessionActiveGroups: { 'session-a': 'g1' } }
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, settings)).toBe('g2')
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, settings, undefined)).toBe('g2')
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, settings, null)).toBe('g2')
+  })
 })

@@ -32,22 +32,35 @@ export interface CoAgentHubPluginConfig {
 
 /**
  * 推送侧会话→群解析(纯函数,便于单测):与拉取侧
- * `coagenthub_get_notifications`(tools.ts)一致——先看 `settings.activeGroupId`:
- * 非空且能在 groups 中找到时直接使用(手动保存的工作区优先生效);否则按会话
- * cwd 调 findGroupByWorkspaceCwd 反查群,反查不到再返回 null。
- * 与拉取侧的刻意差异:activeGroupId 与 cwd 都拿不到归属群时直接返回 null——按
- * 任务需求 3,不确定归属群时回退"禁用主动推送、全部入队",由各会话按需拉取;
- * 绝不把其他群的通知注入当前会话。
+ * `coagenthub_get_notifications`(tools.ts)一致——有 sessionId 时先查该会话的
+ * per-session 映射 `settings.sessionActiveGroups[sessionId]`:非空且能在 groups
+ * 中找到时直接使用(面板按会话保存的工作区优先生效),否则按会话 cwd 调
+ * findGroupByWorkspaceCwd 反查群;有 sessionId 时绝不回退全局 activeGroupId
+ * (避免跨会话污染)。无 sessionId 时保留全局 activeGroupId 兼容兜底,再按 cwd
+ * 反查;反查不到再返回 null。
+ * 与拉取侧的刻意差异:映射与 cwd 都拿不到归属群时直接返回 null——按任务需求
+ * 3,不确定归属群时回退"禁用主动推送、全部入队",由各会话按需拉取;绝不把
+ * 其他群的通知注入当前会话。
  */
 export function resolveGroupIdForCwd(
   cwd: string | null | undefined,
   groups: readonly GroupWithPath[],
   settings: CoAgentHubSettings | undefined,
+  sessionId?: string | null,
 ): string | null {
-  const activeGroupId = settings?.activeGroupId
-  if (activeGroupId !== undefined && activeGroupId.trim() !== '') {
-    const active = groups.find(group => group.id === activeGroupId)
-    if (active !== undefined) return active.id
+  if (sessionId !== null && sessionId !== undefined && sessionId.trim() !== '') {
+    const perSession = settings?.sessionActiveGroups?.[sessionId]
+    if (perSession !== undefined && perSession.trim() !== '') {
+      const active = groups.find(group => group.id === perSession)
+      if (active !== undefined) return active.id
+    }
+    // per-session 未命中/已失效:直接按 cwd 反查,不回退全局 activeGroupId。
+  } else {
+    const activeGroupId = settings?.activeGroupId
+    if (activeGroupId !== undefined && activeGroupId.trim() !== '') {
+      const active = groups.find(group => group.id === activeGroupId)
+      if (active !== undefined) return active.id
+    }
   }
   if (cwd === null || cwd === undefined || cwd.trim() === '') return null
   return findGroupByWorkspaceCwd(groups, cwd, settings?.mappingRule)?.id ?? null
@@ -90,14 +103,21 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     // 工具的 live root agent cwd 回退解析器:晚绑定 agentsRegistry(由下方
     // ctx.inject(['agents']) 接线后赋值),解析器只在被调用时现查
     // registry.roots()[0] 的会话目录;agents 服务未接线/已下线时返回 null。
-    // 工具层解析群时优先 settings.activeGroupId(手动保存的工作区),cwd 仅在
-    // activeGroupId 未设置/已失效时兜底,绝不误用 process.cwd()。
+    // 工具层解析群时优先当前会话 per-session 映射(面板按会话保存的工作区),
+    // 无 sessionId 时才回退全局 activeGroupId 兼容兜底,再按 cwd 反查,
+    // 绝不误用 process.cwd()。
     return registerCoAgentHubTools(ctx, client, settingsStore, () => {
       const agent = agentsRegistry?.roots()[0]
       // 与推送侧 resolveSessionGroupId 一致:header.cwd 优先,旧结构 meta.cwd 兜底。
       const session = agent?.session as { header?: { cwd?: string }; meta?: { cwd?: string } } | undefined
       const cwd = session?.header?.cwd ?? session?.meta?.cwd
       return cwd !== undefined && cwd !== null && cwd.trim() !== '' ? cwd : null
+    }, () => {
+      // 会话 id 回退解析器:exec 未携带 agent 时,用 root agent 的会话 id 查
+      // per-session 映射,与 cwd 回退同源(agent.session.id)。
+      const agent = agentsRegistry?.roots()[0]
+      const sessionId = agent?.session?.id
+      return sessionId !== undefined && sessionId !== null && sessionId.trim() !== '' ? sessionId : null
     })
   }, 'coagenthub.tools()')
 
@@ -139,24 +159,29 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     ctx.logger?.('coagenthub').info('dsh 运行时支持主动唤醒(agent.followup),通知将直接推送进会话并唤醒 driver')
     deliverer.setPushAdapter(new DshAgentPushAdapter({
       resolveAgent: () => registry.roots()[0],
-      // 推送前按 activeGroupId → 会话 cwd 反查的顺序解析群隔离:手动保存的
-      // activeGroupId(非空且存在于群列表)优先生效;否则用
+      // 推送前按 当前会话 per-session 映射 → 会话 cwd 反查 的顺序解析群隔离:
+      // 面板按会话保存的工作区(非空且存在于群列表)优先生效;否则用
       // agent.session.header.cwd(dsh-session SessionHeader)反查——它是会话创建
       // 时的绝对工作目录,旧结构回退 meta.cwd。只把该群的通知 followup 推入
       // 本会话,其他群的通知由适配器入队隔离,避免 0.0.16 后 TaskWatcher 收集
       // 到的其他群通知被注入当前会话。
-      // 会话→群反查结果按 agent 会话 + settings 缓存(TTL 内复用),避免每条
-      // 通知都打一次 listGroups HTTP(接口慢/挂时最坏卡 10s,通知悬在"既未
-      // 入队也未推送"状态);反查失败也缓存为 null,通知立即入队由
-      // coagenthub_get_notifications 补读,网络恢复后 TTL 过期自动重查。
+      // 会话→群反查结果按 agent 会话 + 该会话 per-session 映射 + settings 缓存
+      // (TTL 内复用),避免每条通知都打一次 listGroups HTTP(接口慢/挂时最坏卡
+      // 10s,通知悬在"既未入队也未推送"状态);反查失败也缓存为 null,通知立即
+      // 入队由 coagenthub_get_notifications 补读,网络恢复后 TTL 过期自动重查。
       resolveSessionGroupId: async () => {
         const agent = registry.roots()[0]
         const settings = settingsStore?.get()
+        const session = agent?.session as { id?: string; header?: { cwd?: string }; meta?: { cwd?: string } } | undefined
+        const sessionId = session?.id
+        const cwd = session?.header?.cwd ?? session?.meta?.cwd
         const cacheKey = [
           agent?.id ?? '',
+          sessionId ?? '',
+          settings?.sessionActiveGroups?.[sessionId ?? ''] ?? '',
+          settings?.activeGroupId ?? '',
           settings?.mappingRule?.macPrefix ?? '',
           settings?.mappingRule?.winPrefix ?? '',
-          settings?.activeGroupId ?? '',
         ].join('|')
         const cached = sessionGroupCache.get(cacheKey)
         if (cached !== undefined && Date.now() - cached.at < SESSION_GROUP_CACHE_TTL_MS) {
@@ -167,12 +192,9 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
         if (inflight !== undefined) return inflight
         const pending = (async (): Promise<string | null> => {
           if (agent === undefined) return null
-          // 与拉取侧 workspaceRootFromExec 一致:header.cwd 优先,旧结构 meta.cwd 兜底。
-          const session = agent.session as { header?: { cwd?: string }; meta?: { cwd?: string } } | undefined
-          const cwd = session?.header?.cwd ?? session?.meta?.cwd
           try {
             const groups = await withTimeout(client.listGroups(100), SESSION_GROUP_RESOLVE_TIMEOUT_MS)
-            return resolveGroupIdForCwd(cwd, groups.items, settings)
+            return resolveGroupIdForCwd(cwd, groups.items, settings, sessionId)
           } catch {
             return null // 反查失败/超时:本轮全部入队,由 get_notifications 补读。
           }

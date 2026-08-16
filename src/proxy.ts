@@ -88,7 +88,8 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 /**
  * Settings endpoints: `GET` returns the current settings, `PUT` merges a patch
- * `{ apiBase?, participantId? }`, persists best-effort and applies immediately.
+ * `{ apiBase?, participantId?, mappingRule?, activeGroupId?, sessionActiveGroups? }`,
+ * persists best-effort and applies immediately.
  */
 export async function handleSettings(
   req: IncomingMessage,
@@ -108,6 +109,7 @@ export async function handleSettings(
         participantId: parsed.participantId,
         mappingRule: parsed.mappingRule,
         activeGroupId: parsed.activeGroupId,
+        sessionActiveGroups: parsed.sessionActiveGroups,
       }
     } catch {
       json(res, 400, { error: 'invalid JSON body' })

@@ -138,23 +138,28 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
   const [workspaceStatus, setWorkspaceStatus] = useState<WorkspaceStatusView | null>(null)
   // 上次看到的 dsh 会话 id;变化时重新读取该会话记忆的工作区。
   const lastSessionIdRef = useRef<string | null>(null)
-  // 上次镜像到 host 的 activeGroupId;undefined 哨兵 = 首次尚未同步,保证 mount
-  // 时即使没有保存值也会执行一次清空(host 可能残留上一个会话的值)。
-  const lastMirroredHostGroupRef = useRef<string | null | undefined>(undefined)
+  // 上次镜像到 host 的 per-session 项 { sessionId, groupId };null 哨兵 = 首次
+  // 尚未同步,保证 mount 时即使没有保存值也会执行一次同步(清除该会话的 host
+  // 项,host 可能残留上一个会话该 sessionId 的值)。
+  const lastMirroredHostRef = useRef<{ sessionId: string | null; groupId: string | null } | null>(null)
 
-  // 将当前会话记忆的工作区镜像到 host activeGroupId:有保存值镜像该值,无保存值
-  // (null)清空 host,让 agent 侧工具回落按会话 cwd 自动解析,避免上一个会话的
-  // host 残留泄漏到新会话。值未变时跳过,避免轮询期间反复触发无意义的 PUT;
-  // 失败 best-effort(saveActiveGroupId 内部 catch,静默)。
+  // 将当前会话记忆的工作区镜像到 host 的 per-session 映射:有保存值镜像该值,
+  // 无保存值(null)清除该 sessionId 的 host 项,让 agent 侧工具回落按会话 cwd
+  // 自动解析,不影响其他会话的映射。去重按 (sessionId, groupId) 一起记——同一
+  // 个群在不同会话里也要各自同步,避免切会话时漏发;失败 best-effort
+  // (saveActiveGroupId 内部 catch,静默)。
   const syncHostActiveGroupId = useCallback((saved: string | null): void => {
-    if (saved === lastMirroredHostGroupRef.current) return
-    lastMirroredHostGroupRef.current = saved
+    const sessionId = getCurrentDshSessionId()
+    const last = lastMirroredHostRef.current
+    if (last !== null && last.sessionId === sessionId && last.groupId === saved) return
+    lastMirroredHostRef.current = { sessionId, groupId: saved }
     void saveActiveGroupId(saved).catch(() => {})
   }, [])
 
   // 加载群投影状态;保存设置后(reloadKey)重新拉取,映射规则变化能反映到下拉。
   // 工作区只读当前会话的 per-session 记忆:无记录时保持「自动(按 cwd)」(null),
-  // 并同步清空 host activeGroupId,让 agent 侧工具回落按会话 cwd 自动解析。
+  // 并同步清除该 sessionId 的 host per-session 项,让 agent 侧工具回落按会话
+  // cwd 自动解析(不清全局 activeGroupId,避免影响其他会话)。
   useEffect(() => {
     let alive = true
     fetchWorkspaceStatus().then(
@@ -164,7 +169,8 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
     const saved = readSessionActiveGroupId()
     setActiveGroupId(saved)
     setWorkspaceDraft(saved)
-    // mount 时同步一次 host 镜像(无保存值则清空残留);reloadKey 后值未变会跳过。
+    // mount 时同步一次 host per-session 镜像(无保存值则清除该会话的 host 项);
+    // reloadKey 后值未变会跳过。
     syncHostActiveGroupId(saved)
     return () => { alive = false }
   }, [reloadKey, syncHostActiveGroupId])
@@ -172,8 +178,8 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
   // dsh 会话切换检测:轻量轮询(1s)对比上次 sessionId;变化时重新读取该会话
   // 记忆的工作区并刷新状态。visibilitychange / focus 时无条件重读(即使会话
   // 未变,也刷新为该会话最新的记忆值)。未保存的草稿在切换/刷新时丢弃。
-  // 每次读取后同步 host activeGroupId 镜像:有保存值镜像该值,无保存值清空,
-  // 杜绝上一会话的 host 残留泄漏到新会话。
+  // 每次读取后同步 host per-session 镜像:有保存值镜像该值,无保存值清除该
+  // sessionId 的 host 项,杜绝上一会话的映射残留泄漏到新会话。
   useEffect(() => {
     const refreshForSession = (): void => {
       const sessionId = getCurrentDshSessionId()
@@ -212,13 +218,14 @@ export function CoAgentHubPanel({ apiBase = DEFAULT_API_BASE }: CoAgentHubPanelP
     setWorkspaceDraft(next)
   }
 
-  // 点「保存」才提交草稿:写入当前会话 per-session 记忆并镜像 host。
-  // host 镜像失败只影响 agent 侧工具,不阻塞本次保存。
+  // 点「保存」才提交草稿:写入当前会话 per-session 记忆并镜像 host per-session
+  // 映射。host 镜像失败只影响 agent 侧工具,不阻塞本次保存。
   const handleWorkspaceSave = (): void => {
     writeActiveGroupId(workspaceDraft)
     setActiveGroupId(workspaceDraft)
-    // 已镜像的值直接记录,避免后续轮询/focus 同步再发一次相同的 PUT。
-    lastMirroredHostGroupRef.current = workspaceDraft
+    // 已镜像的 (sessionId, groupId) 直接记录,避免后续轮询/focus 同步再发一次
+    // 相同的 PUT。
+    lastMirroredHostRef.current = { sessionId: getCurrentDshSessionId(), groupId: workspaceDraft }
     void saveActiveGroupId(workspaceDraft).catch(() => {})
   }
 

@@ -29,6 +29,12 @@ export interface CoAgentHubSettings {
   mappingRule?: PathMappingRule
   /** Currently selected virtual workspace (group id); mirrored host-side. */
   activeGroupId?: string
+  /**
+   * Per-dsh-session workspace mapping: key=sessionId, value=groupId. 面板按
+   * 当前 sessionId 保存手动选择,host 工具按当前会话 session.id 查询,彻底避免
+   * 全局 activeGroupId 跨会话污染。空值(由 set 合并时以空串清除)不出现在这里。
+   */
+  sessionActiveGroups?: Record<string, string>
 }
 
 /** File name of the persisted settings under `$DSH_HOME` (or `~/.dsh`). */
@@ -45,7 +51,12 @@ export function defaultConfigFilePath(): string {
   return join(homedir(), '.dsh', CONFIG_FILE_NAME)
 }
 
-/** Drop empty strings, unknown keys, and malformed mapping rules so persistence stays clean. */
+/**
+ * Drop empty strings, unknown keys, and malformed mapping rules so persistence
+ * stays clean. `sessionActiveGroups` is cleaned per entry: empty keys, non-string
+ * values, and empty-string values are dropped; a non-object value drops the
+ * whole record; an empty result drops the field entirely.
+ */
 function clean(settings: CoAgentHubSettings): CoAgentHubSettings {
   const out: CoAgentHubSettings = {}
   if (settings.apiBase !== undefined && settings.apiBase.trim() !== '') out.apiBase = settings.apiBase.trim()
@@ -64,6 +75,21 @@ function clean(settings: CoAgentHubSettings): CoAgentHubSettings {
   ) {
     out.mappingRule = { macPrefix: rule.macPrefix.trim(), winPrefix: rule.winPrefix.trim() }
   }
+  const record = settings.sessionActiveGroups
+  if (
+    record !== undefined
+    && record !== null
+    && typeof record === 'object'
+    && !Array.isArray(record)
+  ) {
+    const cleaned: Record<string, string> = {}
+    for (const [key, value] of Object.entries(record)) {
+      if (typeof key !== 'string' || key.trim() === '') continue
+      if (typeof value !== 'string' || value.trim() === '') continue
+      cleaned[key] = value.trim()
+    }
+    if (Object.keys(cleaned).length > 0) out.sessionActiveGroups = cleaned
+  }
   return out
 }
 
@@ -77,6 +103,7 @@ function loadFromDisk(filePath: string | null): CoAgentHubSettings {
       participantId: parsed.participantId,
       mappingRule: parsed.mappingRule,
       activeGroupId: parsed.activeGroupId,
+      sessionActiveGroups: parsed.sessionActiveGroups,
     })
   } catch {
     return {}
@@ -114,6 +141,11 @@ export class CoAgentHubSettingsStore {
    * A key whose patch value is `undefined` counts as "not provided" and keeps
    * its previous value; only explicitly provided values (including `''` or
    * `null`) are written, so a partial PUT never wipes other settings.
+   *
+   * `sessionActiveGroups` merges per sessionId: only the entries present in the
+   * patch are written, other sessions' mappings stay untouched. An entry whose
+   * value is `''`/`null` clears that session's mapping; `null` as the whole
+   * patch value clears the entire record (mirrors `mappingRule: null`).
    */
   set(patch: CoAgentHubSettings): CoAgentHubSettings {
     const next: CoAgentHubSettings = { ...this.settings }
@@ -121,6 +153,21 @@ export class CoAgentHubSettingsStore {
     if (patch.participantId !== undefined) next.participantId = patch.participantId
     if (patch.mappingRule !== undefined) next.mappingRule = patch.mappingRule
     if (patch.activeGroupId !== undefined) next.activeGroupId = patch.activeGroupId
+    if (patch.sessionActiveGroups !== undefined) {
+      const record = patch.sessionActiveGroups
+      if (record === null || typeof record !== 'object' || Array.isArray(record)) {
+        // 不合法 record(null / 数组 / 非对象):与 clean() 一致,整体丢弃。
+        delete next.sessionActiveGroups
+      } else {
+        const merged: Record<string, string> = { ...(next.sessionActiveGroups ?? {}) }
+        for (const [sessionId, groupId] of Object.entries(record)) {
+          if (typeof sessionId !== 'string' || sessionId.trim() === '') continue
+          if (typeof groupId === 'string' && groupId.trim() !== '') merged[sessionId] = groupId.trim()
+          else delete merged[sessionId]
+        }
+        next.sessionActiveGroups = merged
+      }
+    }
     this.settings = clean(next)
     persistToDisk(this.filePath, this.settings)
     return this.get()

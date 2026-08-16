@@ -149,6 +149,45 @@ describe('settings endpoints (host)', () => {
     expect(JSON.parse(res.body)).toEqual({ apiBase: 'http://192.168.31.92:3001/api', participantId: 'p-9' })
   })
 
+  it('PUT passes through sessionActiveGroups and merges per session', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    let res = makeRes()
+    await handleSettings(
+      makeReq('PUT', SETTINGS_PATH, JSON.stringify({ sessionActiveGroups: { 'session-a': 'g1' } })),
+      res as unknown as ServerResponse,
+      store,
+    )
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({
+      ok: true,
+      settings: { sessionActiveGroups: { 'session-a': 'g1' } },
+    })
+
+    // 第二次 PUT 只更新 session-b,不影响 session-a。
+    res = makeRes()
+    await handleSettings(
+      makeReq('PUT', SETTINGS_PATH, JSON.stringify({ sessionActiveGroups: { 'session-b': 'g2' } })),
+      res as unknown as ServerResponse,
+      store,
+    )
+    expect(JSON.parse(res.body).settings).toEqual({
+      sessionActiveGroups: { 'session-a': 'g1', 'session-b': 'g2' },
+    })
+
+    // 空串清除该会话项,其他会话保留。
+    res = makeRes()
+    await handleSettings(
+      makeReq('PUT', SETTINGS_PATH, JSON.stringify({ sessionActiveGroups: { 'session-a': '' } })),
+      res as unknown as ServerResponse,
+      store,
+    )
+    expect(JSON.parse(res.body).settings).toEqual({ sessionActiveGroups: { 'session-b': 'g2' } })
+
+    res = makeRes()
+    await handleSettings(makeReq('GET', SETTINGS_PATH), res as unknown as ServerResponse, store)
+    expect(JSON.parse(res.body)).toEqual({ sessionActiveGroups: { 'session-b': 'g2' } })
+  })
+
   it('rejects an invalid JSON body with 400', async () => {
     const store = new CoAgentHubSettingsStore(null)
     const res = makeRes()

@@ -30,6 +30,8 @@ export const WORKSPACE_INSTRUCTIONS_FILE = 'COAGENTHUB.md'
 export interface WorkspaceExecLike {
   agent?: {
     session?: {
+      /** 会话 id(真实路径):dsh-session Session.id,按会话查 per-session 工作区映射。 */
+      id?: string
       /** 会话头字段(真实路径):dsh-session SessionHeader.cwd,会话创建时的绝对工作目录。 */
       header?: { cwd?: string }
       /** 旧结构兼容:dsh-session CreateSessionOptions.meta 里的 cwd(真实 Session 上没有该字段)。 */
@@ -47,8 +49,26 @@ export interface WorkspaceExecLike {
  */
 export type LiveAgentCwdResolver = () => string | null
 
+/**
+ * 从 live root agent 会话解析 session id 的回退解析器:与
+ * {@link LiveAgentCwdResolver} 同源,工具经非 agent 路径执行时用 root agent
+ * 的 `agent.session.id` 作为 per-session 映射的查询键;拿不到时返回 null。
+ */
+export type LiveAgentSessionIdResolver = () => string | null
+
 function isUsableCwd(cwd: string | null | undefined): cwd is string {
   return cwd !== undefined && cwd !== null && cwd.trim() !== ''
+}
+
+/**
+ * Read the current session id from a tool exec context: `agent.session.id`
+ * (真实路径:dsh-session Session.id,见 {@link WorkspaceExecLike})。拿不到或为空
+ * 时返回 null,调用方随之回落全局 activeGroupId 兼容兜底 / 按 cwd 反查。
+ */
+export function sessionIdFromExec(exec: unknown): string | null {
+  const ctx = exec as WorkspaceExecLike | undefined
+  const id = ctx?.agent?.session?.id
+  return typeof id === 'string' && id.trim() !== '' ? id : null
 }
 
 /**

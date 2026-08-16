@@ -257,9 +257,10 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     expect(select.textContent).toContain('Z:\\dsh-coagenthub')
   })
 
-  it('默认选中「自动（按 cwd）」:无保存记录时清空 host activeGroupId(不写本地存储)', async () => {
+  it('默认选中「自动（按 cwd）」:无保存记录时清除该会话的 host per-session 映射(不写本地存储)', async () => {
     const fetchMock = workspacePanelFetchMock([PROJECTION])
     vi.stubGlobal('fetch', fetchMock)
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-new' }))
 
     render(<CoAgentHubPanel />)
 
@@ -272,17 +273,18 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     expect(select.textContent).toContain('自动（按 cwd）')
     // 本地存储不写入任何 per-session/全局 key
     expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBeNull()
-    // 但 host 镜像被清空(null → 空串),避免沿用上一会话的残留
+    // 但 host 的该会话映射被清除(null → 空串),避免沿用残留;不影响其他会话
     expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ activeGroupId: '' }),
+      body: JSON.stringify({ sessionActiveGroups: { 'session-new': '' } }),
     }))
   })
 
-  it('手动选择群只更新草稿:点「保存」才写 per-session 并镜像 host', async () => {
+  it('手动选择群只更新草稿:点「保存」才写 per-session 并镜像 host per-session 映射', async () => {
     const fetchMock = workspacePanelFetchMock([PROJECTION])
     vi.stubGlobal('fetch', fetchMock)
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
 
     render(<CoAgentHubPanel />)
 
@@ -292,15 +294,15 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     })
     fireEvent.change(select, { target: { value: 'g1' } })
 
-    // 未保存:下拉变了,但没有写入任何存储,也没有镜像 g1(mount 时仅清空过 host)
+    // 未保存:下拉变了,但没有写入任何存储,也没有镜像 g1(mount 时仅清除过该会话的 host 映射)
     expect(select.value).toBe('g1')
     expect(localStorage.getItem(ACTIVE_GROUP_STORAGE_KEY)).toBeNull()
     expect(fetchMock).not.toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
       method: 'PUT',
-      body: JSON.stringify({ activeGroupId: 'g1' }),
+      body: JSON.stringify({ sessionActiveGroups: { 'session-a': 'g1' } }),
     }))
 
-    // 出现「保存工作区」按钮,点了才写 localStorage 并镜像 host
+    // 出现「保存工作区」按钮,点了才写 localStorage 并镜像 host per-session 映射
     fireEvent.click(screen.getByRole('button', { name: '保存工作区' }))
 
     await waitFor(() => {
@@ -309,11 +311,11 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ activeGroupId: 'g1' }),
+      body: JSON.stringify({ sessionActiveGroups: { 'session-a': 'g1' } }),
     }))
   })
 
-  it('新会话无 per-session 保存值时,挂载即清空 host activeGroupId', async () => {
+  it('新会话无 per-session 保存值时,挂载即清除该会话的 host per-session 映射', async () => {
     const fetchMock = workspacePanelFetchMock([PROJECTION])
     vi.stubGlobal('fetch', fetchMock)
     // 模拟残留:全局 key 还留着上一个会话手动选的值,但新会话没有 per-session 记忆
@@ -322,19 +324,20 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
 
     render(<CoAgentHubPanel />)
 
-    // host 被清空(null → 空串),agent 侧工具回落按会话 cwd 自动解析
+    // 该会话的 host 映射被清除(null → 空串),agent 侧工具回落按会话 cwd 自动解析;
+    // 不写全局 activeGroupId,不影响其他会话的映射
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activeGroupId: '' }),
+        body: JSON.stringify({ sessionActiveGroups: { 'session-new': '' } }),
       }))
     })
-    // 只清空 host,不写任何 per-session 记忆
+    // 只清 host 的该会话项,不写任何 per-session 记忆
     expect(localStorage.getItem(activeGroupSessionKey('session-new'))).toBeNull()
   })
 
-  it('新会话有 per-session 保存值时,挂载镜像该值到 host activeGroupId', async () => {
+  it('新会话有 per-session 保存值时,挂载镜像该值到 host 的该会话映射', async () => {
     const fetchMock = workspacePanelFetchMock([PROJECTION])
     vi.stubGlobal('fetch', fetchMock)
     localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
@@ -346,12 +349,12 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
       expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activeGroupId: 'g1' }),
+        body: JSON.stringify({ sessionActiveGroups: { 'session-a': 'g1' } }),
       }))
     })
   })
 
-  it('切换会话时,host activeGroupId 按目标会话的 per-session 值同步', async () => {
+  it('切换会话时,host per-session 映射按目标会话的值同步(互不影响)', async () => {
     const fetchMock = workspacePanelFetchMock([PROJECTION])
     vi.stubGlobal('fetch', fetchMock)
     localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-a' }))
@@ -359,21 +362,21 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
 
     render(<CoAgentHubPanel />)
 
-    // 初始:session-a 的记忆 g1 镜像到 host
+    // 初始:session-a 的记忆 g1 镜像到 host 的 session-a 映射
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ activeGroupId: 'g1' }),
+        body: JSON.stringify({ sessionActiveGroups: { 'session-a': 'g1' } }),
       }))
     })
 
-    // 切到 session-b:该会话无记忆 → host 被清空,回落 cwd 自动解析
+    // 切到 session-b:该会话无记忆 → 清除 host 的 session-b 项(不动 session-a 的映射),回落 cwd 自动解析
     localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-b' }))
     window.dispatchEvent(new Event('focus'))
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ activeGroupId: '' }),
+        body: JSON.stringify({ sessionActiveGroups: { 'session-b': '' } }),
       }))
     })
 
@@ -383,7 +386,7 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ activeGroupId: 'g2' }),
+        body: JSON.stringify({ sessionActiveGroups: { 'session-b': 'g2' } }),
       }))
     })
   })
@@ -501,15 +504,46 @@ describe('CoAgentHubPanel 当前工作区 dropdown', () => {
 })
 
 describe('workspace selection helpers', () => {
-  it('clears the host mirror with an empty string when deselected', async () => {
+  it('保存时按当前 sessionId 发送 per-session 映射(sessionActiveGroups)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, settings: {} }))
     vi.stubGlobal('fetch', fetchMock)
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-abc' }))
+
+    await saveActiveGroupId('g1')
+
+    expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionActiveGroups: { 'session-abc': 'g1' } }),
+    }))
+  })
+
+  it('清除时发送空串,仅清除该 sessionId 的 host 映射', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, settings: {} }))
+    vi.stubGlobal('fetch', fetchMock)
+    localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'session-abc' }))
 
     await saveActiveGroupId(null)
 
     expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionActiveGroups: { 'session-abc': '' } }),
+    }))
+  })
+
+  it('无 sessionId 时回退旧全局 activeGroupId 写法(兼容无会话桥接路径)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true, settings: {} }))
+    vi.stubGlobal('fetch', fetchMock)
+    localStorage.removeItem('dsh.sessions.current')
+
+    await saveActiveGroupId('g1')
+    await saveActiveGroupId(null)
+
+    expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
+      body: JSON.stringify({ activeGroupId: 'g1' }),
+    }))
+    expect(fetchMock).toHaveBeenCalledWith('/coagenthub-api-config', expect.objectContaining({
       body: JSON.stringify({ activeGroupId: '' }),
     }))
   })

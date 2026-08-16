@@ -116,6 +116,82 @@ describe('CoAgentHubSettingsStore.set patch merge semantics', () => {
     store.set({ mappingRule: null } as never)
     expect(store.get()).toEqual({ activeGroupId: 'g1' })
   })
+
+  it('set({ sessionActiveGroups }) merges per sessionId and keeps other sessions untouched', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g1' } })
+    store.set({ sessionActiveGroups: { 'session-b': 'g2' } })
+    expect(store.get()).toEqual({
+      sessionActiveGroups: { 'session-a': 'g1', 'session-b': 'g2' },
+    })
+  })
+
+  it('set({ sessionActiveGroups: { id: \'\' } }) clears only that session, keeping others', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g1', 'session-b': 'g2' } })
+    store.set({ sessionActiveGroups: { 'session-a': '' } })
+    expect(store.get()).toEqual({ sessionActiveGroups: { 'session-b': 'g2' } })
+  })
+
+  it('set({ sessionActiveGroups: { id: null } }) clears only that session', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g1', 'session-b': 'g2' } })
+    store.set({ sessionActiveGroups: { 'session-a': null } } as never)
+    expect(store.get()).toEqual({ sessionActiveGroups: { 'session-b': 'g2' } })
+  })
+
+  it('set({ sessionActiveGroups: undefined }) leaves the record untouched', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g1' } })
+    store.set({ sessionActiveGroups: undefined })
+    expect(store.get()).toEqual({ sessionActiveGroups: { 'session-a': 'g1' } })
+  })
+
+  it('set({ sessionActiveGroups: null }) clears the whole record', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g1', 'session-b': 'g2' } })
+    store.set({ sessionActiveGroups: null } as never)
+    expect(store.get()).toEqual({})
+  })
+
+  it('set({ sessionActiveGroups }) trims group ids and ignores empty keys/values', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({
+      sessionActiveGroups: {
+        'session-a': ' g1 ',
+        '': 'g-empty-key',
+        'session-b': '',
+        'session-c': '   ',
+      },
+    } as never)
+    expect(store.get()).toEqual({ sessionActiveGroups: { 'session-a': 'g1' } })
+  })
+
+  it('clean drops a non-object sessionActiveGroups (array / number / string)', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: ['a', 'b'] } as never)
+    expect(store.get()).toEqual({})
+    store.set({ sessionActiveGroups: 42 } as never)
+    expect(store.get()).toEqual({})
+    store.set({ sessionActiveGroups: 'g1' } as never)
+    expect(store.get()).toEqual({})
+  })
+
+  it('clean drops non-string values inside sessionActiveGroups', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 123, 'session-b': null } } as never)
+    expect(store.get()).toEqual({})
+  })
+
+  it('set({ apiBase }) keeps sessionActiveGroups untouched', () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g1' }, apiBase: 'http://a:1/api' })
+    store.set({ apiBase: 'http://b:2/api' })
+    expect(store.get()).toEqual({
+      apiBase: 'http://b:2/api',
+      sessionActiveGroups: { 'session-a': 'g1' },
+    })
+  })
 })
 
 describe('CoAgentHubSettingsStore (fallback path)', () => {
@@ -132,6 +208,26 @@ describe('CoAgentHubSettingsStore (fallback path)', () => {
         apiBase: 'http://192.168.31.92:3001/api',
         participantId: 'win-1',
         activeGroupId: 'g1',
+      })
+    } finally {
+      restoreHome(previous)
+      rmSync(dir, { recursive: true, force: true })
+      if (previousDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousDshHome
+    }
+  })
+
+  it('persists sessionActiveGroups and reloads them after restart', () => {
+    const previousDshHome = process.env.DSH_HOME
+    delete process.env.DSH_HOME
+    const { dir, previous } = stubHomedir()
+    try {
+      const first = new CoAgentHubSettingsStore() // default path → ~/.dsh/coagenthub-config.json
+      first.set({ sessionActiveGroups: { 'session-a': 'g1', 'session-b': 'g2' } })
+
+      const reloaded = new CoAgentHubSettingsStore() // simulates a dsh web restart
+      expect(reloaded.get()).toEqual({
+        sessionActiveGroups: { 'session-a': 'g1', 'session-b': 'g2' },
       })
     } finally {
       restoreHome(previous)

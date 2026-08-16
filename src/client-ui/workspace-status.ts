@@ -68,14 +68,24 @@ export async function fetchWorkspaceStatus(): Promise<WorkspaceStatusView> {
   return { mappingRule: data.mappingRule ?? null, workspaces: data.workspaces ?? [] }
 }
 
-/** Mirror the active selection to the host settings store (host tool reads it). */
+/**
+ * Mirror the active selection to the host settings store per dsh session
+ * (host tools query by current session.id). Sends
+ * `{ sessionActiveGroups: { [sessionId]: groupId ?? '' } }` — groupId 为
+ * null/'' 表示清除该会话的 host 映射(不影响其他会话)。无 sessionId 时回退旧
+ * 的全局 activeGroupId 写法(兼容无会话桥接路径)。
+ */
 export async function saveActiveGroupId(groupId: string | null): Promise<void> {
+  const sessionId = getCurrentDshSessionId()
+  const body = sessionId === null
+    ? { activeGroupId: groupId ?? '' }
+    : { sessionActiveGroups: { [sessionId]: groupId ?? '' } }
   const response = await fetch(SETTINGS_PATH, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     // 空串而非 undefined:JSON.stringify 会丢弃 undefined 键,导致 host 收不到
     // 清除信号、镜像里残留旧值;空串会被 host 的 clean() 丢弃,即清除。
-    body: JSON.stringify({ activeGroupId: groupId ?? '' }),
+    body: JSON.stringify(body),
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
 }

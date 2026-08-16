@@ -65,6 +65,18 @@ function executeWithCwd(tool: ToolDefinition, args: Record<string, unknown>, cwd
   return tool.execute(args, { agent: { session: { header: { cwd } } } } as never)
 }
 
+/** Execute with an explicit session id (+ optional cwd);per-session 映射按 session.id 查询。 */
+function executeWithSession(
+  tool: ToolDefinition,
+  args: Record<string, unknown>,
+  sessionId: string,
+  cwd?: string,
+): Promise<unknown> {
+  return tool.execute(args, {
+    agent: { session: { id: sessionId, ...(cwd !== undefined ? { header: { cwd } } : {}) } },
+  } as never)
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -1469,6 +1481,187 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
     expect(result).toEqual(expect.objectContaining({ groupId: 'g9', groupTitle: 'dsh-coagenthub 插件开发' }))
+  })
+
+  it('get_active_group prefers the session per-session mapping over the cwd-matched group', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g2' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [
+          group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub'),
+          group('g2', '手动保存群', 'active', '/repo/b'),
+        ],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    // cwd 命中 g1,但 session-a 的 per-session 映射 g2 优先。
+    const result = (await executeWithSession(tool, {}, 'session-a', '/Users/apple/Desktop/Projects/dsh-coagenthub')) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({ groupId: 'g2', groupTitle: '手动保存群' }))
+  })
+
+  it('get_active_group falls back to cwd when the session per-session mapping is missing', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g2' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [
+          group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub'),
+          group('g2', '手动保存群', 'active', '/repo/b'),
+        ],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    // session-b 无映射 → 按 cwd 反查命中 g1。
+    const result = (await executeWithSession(tool, {}, 'session-b', '/Users/apple/Desktop/Projects/dsh-coagenthub')) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({ groupId: 'g1', groupTitle: 'dsh-coagenthub 插件开发' }))
+  })
+
+  it('get_active_group falls back to cwd when the session per-session mapping no longer exists in groups', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'ghost' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g9', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub')],
+        total: 1,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    // 映射的 g1 已不在群列表中(视为未设置),cwd 反查兜底命中 g9。
+    const result = (await executeWithSession(tool, {}, 'session-a', '/Users/apple/Desktop/Projects/dsh-coagenthub')) as Record<string, unknown>
+    expect(result).toEqual(expect.objectContaining({ groupId: 'g9' }))
+  })
+
+  it('get_active_group: A 会话保存的映射不影响 B 会话(跨会话隔离)', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g2' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [
+          group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub'),
+          group('g2', '手动保存群', 'active', '/repo/b'),
+        ],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    // 会话 A:per-session 映射 g2 生效。
+    const fromA = (await executeWithSession(tool, {}, 'session-a', '/Users/apple/Desktop/Projects/dsh-coagenthub')) as Record<string, unknown>
+    expect(fromA).toEqual(expect.objectContaining({ groupId: 'g2' }))
+    // 会话 B:没有 per-session 映射,cwd 反查命中 g1——绝不沿用会话 A 的 g2。
+    const fromB = (await executeWithSession(tool, {}, 'session-b', '/Users/apple/Desktop/Projects/dsh-coagenthub')) as Record<string, unknown>
+    expect(fromB).toEqual(expect.objectContaining({ groupId: 'g1' }))
+  })
+
+  it('get_active_group: 有 sessionId 时全局 activeGroupId 不跨会话污染', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({
+      activeGroupId: 'g2',
+      sessionActiveGroups: { 'session-a': 'g1' },
+    })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [
+          group('g1', 'dsh-coagenthub 插件开发', 'active', '/Users/apple/Desktop/Projects/dsh-coagenthub'),
+          group('g2', '手动保存群', 'active', '/repo/b'),
+        ],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    // 会话 A:per-session 映射 g1 生效。
+    const fromA = (await executeWithSession(tool, {}, 'session-a')) as Record<string, unknown>
+    expect(fromA).toEqual(expect.objectContaining({ groupId: 'g1' }))
+    // 会话 B:无 per-session 映射,cwd 未命中任何群——绝不回退全局 activeGroupId g2。
+    expect(await executeWithSession(tool, {}, 'session-b', '/unmapped')).toBeNull()
+    // 无 sessionId 时(旧路径)全局 activeGroupId 仍作为兼容兜底生效。
+    const legacy = (await tool.execute({}, { agent: { session: { header: { cwd: '/unmapped' } } } } as never)) as Record<string, unknown>
+    expect(legacy).toEqual(expect.objectContaining({ groupId: 'g2' }))
+  })
+
+  it('dispatch_task resolves groupId from the session per-session mapping', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g2' } })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      if (String(url).endsWith('/groups?limit=100')) {
+        return Promise.resolve({
+          items: [group('g1', '群一', 'active', '/repo/a'), group('g2', '群二', 'active', '/repo/b')],
+          total: 2,
+        })
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_dispatch_task')!
+    // cwd 命中 g1,但 session-a 的 per-session 映射 g2 优先。
+    const result = await executeWithSession(tool, { body: '任务', executorName: 'AtomCode' }, 'session-a', '/repo/a')
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+    const [url] = postMessage.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g2/messages')
+  })
+
+  it('get_workspace_instructions prefers the session per-session mapping over cwd', async () => {
+    const groupDir = mkdtempSync(join(tmpdir(), 'coagenthub-ws-session-group-'))
+    const cwdDir = mkdtempSync(join(tmpdir(), 'coagenthub-ws-session-cwd-'))
+    try {
+      writeFileSync(join(groupDir, 'COAGENTHUB.md'), '选中群指令')
+      writeFileSync(join(cwdDir, 'COAGENTHUB.md'), 'cwd 指令(不应被读取)')
+      const store = new CoAgentHubSettingsStore(null)
+      store.set({ sessionActiveGroups: { 'session-a': 'g1' } })
+      const client = clientWith(() =>
+        Promise.resolve({ items: [group('g1', '手动保存群', 'active', groupDir)], total: 1 }),
+      )
+      const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_workspace_instructions')!
+      const result = (await executeWithSession(tool, {}, 'session-a', cwdDir)) as Record<string, unknown>
+      expect(result).toEqual({ groupId: 'g1', groupTitle: '手动保存群', instructions: '选中群指令' })
+    } finally {
+      rmSync(groupDir, { recursive: true, force: true })
+      rmSync(cwdDir, { recursive: true, force: true })
+    }
+  })
+
+  it('get_notifications resolves the group from the session per-session mapping and keeps other groups queued', async () => {
+    notificationQueue.drain()
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g2', taskId: 't2', status: 'done', time: 't2' })
+    notificationQueue.enqueue({ type: 'task.failed', groupId: 'g1', taskId: 't1', status: 'failed', time: 't1' })
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g2' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', '群一', 'active', '/repo/a'), group('g2', '群二', 'active', '/repo/b')],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
+    // cwd 命中 g1,但 session-a 的 per-session 映射 g2 优先:只 drain g2 的通知。
+    const result = (await executeWithSession(tool, {}, 'session-a', '/repo/a')) as Array<{ groupId: string; taskId: string }>
+    expect(result).toEqual([expect.objectContaining({ groupId: 'g2', taskId: 't2' })])
+    expect(notificationQueue.peek()).toEqual([expect.objectContaining({ groupId: 'g1' })])
+    notificationQueue.drain()
+  })
+
+  it('get_notifications: A 会话的 per-session 映射不串到 B 会话', async () => {
+    notificationQueue.drain()
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g2', taskId: 't2', status: 'done', time: 't2' })
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ sessionActiveGroups: { 'session-a': 'g2' } })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', '群一', 'active', '/repo/a'), group('g2', '群二', 'active', '/repo/b')],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
+    // 会话 B 无映射 → cwd 命中 g1,拿不到 g2 的通知(也不消费它)。
+    const fromB = (await executeWithSession(tool, {}, 'session-b', '/repo/a')) as unknown[]
+    expect(fromB).toEqual([])
+    expect(notificationQueue.peek()).toEqual([expect.objectContaining({ groupId: 'g2' })])
+    notificationQueue.drain()
   })
 
   it('get_active_group returns null when cwd matches no group; instructions tool still reads COAGENTHUB.md', async () => {
