@@ -980,28 +980,39 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_get_notifications',
       description:
-        'Return and clear the pending CoAgentHub notifications for the current active group only (task completed / failed / stalled / status changed / new message). Notifications from other groups stay queued and do not leak into the current workspace. Use to catch up on background events instead of polling.',
+        'Return and clear the pending CoAgentHub notifications for the group resolved from the current session workspace (cwd → group; falls back to the active group setting). Notifications from other groups stay queued and do not leak into the current workspace. Use to catch up on background events instead of polling.',
       parameters: {},
       output: { schema: { type: 'array', items: NOTIFICATION_VIEW_SCHEMA } as const, render: renderValue },
-      async execute() {
-        // 通知按当前 active group 隔离:只 drain 当前群的队列条目,其他群的通知
-        // 保留在队列里(drainByGroup),既不会串到当前会话也不会丢失。
-        const settings = settingsStore?.get()
-        const activeGroupId = settings?.activeGroupId
-        const pending = activeGroupId !== undefined && activeGroupId.trim() !== ''
-          ? notificationQueue.drainByGroup(activeGroupId)
-          : []
-        // 归一化:drain() 结果中缺省的 taskId/status/executorName/summary 补 null,
-        // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
-        return pending.map(notification => ({
-          type: notification.type,
-          groupId: notification.groupId,
-          taskId: notification.taskId ?? null,
-          status: notification.status ?? null,
-          executorName: notification.executorName ?? null,
-          summary: notification.summary ?? null,
-          time: notification.time,
-        }))
+      async execute(_args: Record<string, never>, exec: ToolRunContext) {
+        try {
+          // 通知按会话 cwd 反查群隔离:优先 cwd → 群,fallback settingsStore.activeGroupId。
+          // 只 drain 该群的通知,其他群的通知保留在队列里(不会串到当前会话也不会丢失);
+          // 反查不到群时返回空且不消费队列。
+          const settings = settingsStore?.get()
+          const cwd = workspaceRootFromExec(exec)
+          const groups = await client.listGroups(100)
+          const byCwd = findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule)
+          const activeGroupId = settings?.activeGroupId
+          const group = byCwd
+            ?? (activeGroupId !== undefined && activeGroupId.trim() !== ''
+              ? groups.items.find(candidate => candidate.id === activeGroupId) ?? null
+              : null)
+          if (group === null) return []
+          const pending = notificationQueue.drainByGroup(group.id)
+          // 归一化:drain() 结果中缺省的 taskId/status/executorName/summary 补 null,
+          // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
+          return pending.map(notification => ({
+            type: notification.type,
+            groupId: notification.groupId,
+            taskId: notification.taskId ?? null,
+            status: notification.status ?? null,
+            executorName: notification.executorName ?? null,
+            summary: notification.summary ?? null,
+            time: notification.time,
+          }))
+        } catch (error) {
+          throwToolError(error, '通知队列不可用')
+        }
       },
     }),
   ]

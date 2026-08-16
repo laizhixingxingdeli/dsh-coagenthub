@@ -15,9 +15,17 @@ function wsStub() {
   } as unknown as CoAgentHubWsClient
 }
 
-function clientStub(overrides: Partial<{ tasks: unknown[]; participants: unknown[] }> = {}) {
+function clientStub(overrides: Partial<{
+  groups: unknown[]
+  tasks: unknown[]
+  tasksByGroup: Record<string, unknown[]>
+  participants: unknown[]
+}> = {}) {
+  const groups = overrides.groups ?? [{ id: 'g1' }]
   const client = {
-    listTasks: vi.fn().mockResolvedValue(overrides.tasks ?? []),
+    listGroups: vi.fn().mockResolvedValue({ items: groups, total: groups.length }),
+    listTasks: vi.fn().mockImplementation(async (groupId: string) =>
+      overrides.tasksByGroup?.[groupId] ?? overrides.tasks ?? []),
     listParticipants: vi.fn().mockResolvedValue(overrides.participants ?? []),
   } as unknown as CoAgentHubClient
   return client
@@ -26,7 +34,6 @@ function clientStub(overrides: Partial<{ tasks: unknown[]; participants: unknown
 function makeWatcher(overrides: Partial<{
   client: CoAgentHubClient
   ws: CoAgentHubWsClient
-  getActiveGroupId: () => string | undefined
   pollIntervalMs: number
 }> = {}) {
   const delivered: CoAgentHubNotification[] = []
@@ -38,7 +45,6 @@ function makeWatcher(overrides: Partial<{
     client: overrides.client ?? clientStub(),
     ws,
     deliver: deliverer,
-    getActiveGroupId: overrides.getActiveGroupId ?? (() => 'g1'),
     pollIntervalMs: overrides.pollIntervalMs ?? 4_000,
   })
   return { watcher, ws, delivered }
@@ -137,20 +143,21 @@ describe('TaskWatcher.handleFrame', () => {
     expect(delivered).toHaveLength(0)
   })
 
-  it('ignores frames from other groups (active-group isolation)', () => {
+  it('delivers terminal frames from every group (isolation happens at drain time)', () => {
     const { watcher, delivered } = makeWatcher()
     watcher.handleFrame({ type: 'task_status_changed', groupId: 'g2', taskId: 't1', status: 'done' })
     watcher.handleFrame({ type: 'task_stall_alert', groupId: 'g2', taskId: 't2', status: 'stalled' })
-    expect(delivered).toHaveLength(0)
-    // 当前群的帧仍正常投递。
+    expect(delivered).toHaveLength(2)
+    expect(delivered.map(notification => notification.groupId)).toEqual(['g2', 'g2'])
     watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'done' })
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]!.groupId).toBe('g1')
+    expect(delivered).toHaveLength(3)
+    expect(delivered[2]!.groupId).toBe('g1')
   })
 
-  it('ignores all frames when no active group is selected', () => {
-    const { watcher, delivered } = makeWatcher({ getActiveGroupId: () => undefined })
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'done' })
+  it('ignores frames without a groupId (cannot attribute)', () => {
+    const { watcher, delivered } = makeWatcher()
+    watcher.handleFrame({ type: 'task_status_changed', taskId: 't1', status: 'done' })
+    watcher.handleFrame({ type: 'task_stall_alert', taskId: 't2', status: 'stalled' })
     expect(delivered).toHaveLength(0)
   })
 
@@ -196,12 +203,90 @@ describe('TaskWatcher.pollOnce', () => {
     expect(delivered).toHaveLength(1)
   })
 
-  it('does nothing without an active group', async () => {
-    const client = clientStub()
-    const { watcher, delivered } = makeWatcher({ client, getActiveGroupId: () => undefined })
+  it('does nothing when there are no groups', async () => {
+    const client = clientStub({ groups: [] })
+    const { watcher, delivered } = makeWatcher({ client })
     await watcher.pollOnce()
     expect(client.listTasks).not.toHaveBeenCalled()
     expect(delivered).toHaveLength(0)
+  })
+
+  it('polls every group and notifies per group with the right groupId', async () => {
+    const tasksByGroup: Record<string, Array<Record<string, unknown>>> = {
+      g1: [{ id: 't1', groupId: 'g1', status: 'queued', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }],
+      g2: [{ id: 't2', groupId: 'g2', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }],
+    }
+    const client = clientStub({
+      groups: [{ id: 'g1' }, { id: 'g2' }],
+      tasksByGroup,
+      participants: [{ id: 'e1', name: 'AtomCode 执行器' }],
+    })
+    const { watcher, delivered } = makeWatcher({ client })
+
+    await watcher.pollOnce() // 基线:两个群各一个任务,不通知
+    expect(delivered).toHaveLength(0)
+    expect(client.listTasks).toHaveBeenCalledTimes(2)
+
+    tasksByGroup.g1![0] = { ...tasksByGroup.g1![0]!, status: 'done', diffSummary: { summary: '完成', hash: 'h', error: null } }
+    tasksByGroup.g2![0] = { ...tasksByGroup.g2![0]!, status: 'failed', diffSummary: { summary: '报错', hash: null, error: 'x' } }
+    await watcher.pollOnce()
+    expect(delivered).toHaveLength(2)
+    expect(delivered[0]).toMatchObject({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done' })
+    expect(delivered[1]).toMatchObject({ type: 'task.failed', groupId: 'g2', taskId: 't2', status: 'failed' })
+  })
+
+  it('keeps per-group baselines independent (same task id in two groups)', async () => {
+    const tasksByGroup: Record<string, Array<Record<string, unknown>>> = {
+      g1: [{ id: 't1', groupId: 'g1', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }],
+      g2: [{ id: 't1', groupId: 'g2', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }],
+    }
+    const client = clientStub({
+      groups: [{ id: 'g1' }, { id: 'g2' }],
+      tasksByGroup,
+      participants: [{ id: 'e1', name: 'AtomCode 执行器' }],
+    })
+    const { watcher, delivered } = makeWatcher({ client })
+
+    await watcher.pollOnce() // 基线
+    tasksByGroup.g2![0] = { ...tasksByGroup.g2![0]!, status: 'done', diffSummary: { summary: 's', hash: 'h', error: null } }
+    await watcher.pollOnce()
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({ type: 'task.completed', groupId: 'g2', taskId: 't1' })
+  })
+
+  it('swallows client failures silently', async () => {
+    const client = {
+      listGroups: vi.fn().mockRejectedValue(new Error('boom')),
+      listTasks: vi.fn(),
+      listParticipants: vi.fn(),
+    } as unknown as CoAgentHubClient
+    const { watcher, delivered } = makeWatcher({ client })
+    await expect(watcher.pollOnce()).resolves.toBeUndefined()
+    expect(delivered).toHaveLength(0)
+  })
+
+  it('isolates a failing group without dropping other groups', async () => {
+    const listTasks = vi.fn().mockImplementation(async (groupId: string) => {
+      if (groupId === 'g1') throw new Error('boom')
+      return [{ id: 't2', groupId: 'g2', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }]
+    })
+    const client = {
+      listGroups: vi.fn().mockResolvedValue({ items: [{ id: 'g1' }, { id: 'g2' }], total: 2 }),
+      listTasks,
+      listParticipants: vi.fn().mockResolvedValue([]),
+    } as unknown as CoAgentHubClient
+    const { watcher, delivered } = makeWatcher({ client })
+
+    await watcher.pollOnce() // 基线:g1 失败, g2 记录基线
+    expect(delivered).toHaveLength(0)
+
+    listTasks.mockImplementation(async (groupId: string) => {
+      if (groupId === 'g1') throw new Error('boom')
+      return [{ id: 't2', groupId: 'g2', status: 'done', executorParticipantId: 'e1', brief: 'b', diffSummary: { summary: 's', hash: 'h', error: null }, createdAt: 'c', updatedAt: 'u' }]
+    })
+    await watcher.pollOnce()
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({ type: 'task.completed', groupId: 'g2', taskId: 't2' })
   })
 
   it('does not notify on intermediate status changes (running/queued) but notifies on terminal ones', async () => {
@@ -242,16 +327,6 @@ describe('TaskWatcher.pollOnce', () => {
     await watcher.pollOnce() // running→stalled:终态,通知
     expect(delivered).toHaveLength(1)
     expect(delivered[0]).toMatchObject({ type: 'task.stalled', groupId: 'g1', taskId: 't1', status: 'stalled' })
-  })
-
-  it('swallows client failures silently', async () => {
-    const client = {
-      listTasks: vi.fn().mockRejectedValue(new Error('boom')),
-      listParticipants: vi.fn(),
-    } as unknown as CoAgentHubClient
-    const { watcher, delivered } = makeWatcher({ client })
-    await expect(watcher.pollOnce()).resolves.toBeUndefined()
-    expect(delivered).toHaveLength(0)
   })
 })
 

@@ -88,7 +88,6 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     client,
     ws,
     deliver: deliverer,
-    getActiveGroupId: () => settingsStore.get().activeGroupId,
   })
   ctx.effect(
     () => {

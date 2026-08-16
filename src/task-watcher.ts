@@ -1,14 +1,18 @@
 /**
  * Background task-status monitoring (host half). Subscribes to CoAgentHub WS
  * frames (`group_message` / `task_output` / `task_stall_alert`, plus
- * `task_status_changed` when the server emits it) and, as a fallback, polls the
- * active group's tasks at a low frequency to catch queued→running→done/failed
- * transitions. Every detected event is delivered as a notification through the
- * {@link NotificationDeliverer} (queue-backed by default).
+ * `task_status_changed` when the server emits it) and, as a fallback, polls
+ * every group's tasks at a low frequency to catch queued→running→done/failed
+ * transitions. Frames and polls are NOT filtered by the active group: all
+ * groups' terminal events are enqueued, and per-session isolation happens at
+ * drain time (`coagenthub_get_notifications` resolves the group from the
+ * session cwd and drains only that group). Every detected event is delivered
+ * as a notification through the {@link NotificationDeliverer} (queue-backed by
+ * default).
  * @module @laizhixingxingdeli/dsh-coagenthub/task-watcher
  */
 
-import type { CoAgentHubClient, Task } from './client.ts'
+import type { CoAgentHubClient, Group, Task } from './client.ts'
 import type { CoAgentHubNotification, CoAgentHubNotificationType } from './notification-queue.ts'
 import type { NotificationDeliverer } from './notify.ts'
 import type { CoAgentHubWsClient, WsEventFrame } from './ws-client.ts'
@@ -26,8 +30,6 @@ export interface TaskWatcherOptions {
   ws: CoAgentHubWsClient
   /** Notification sink (queue + optional active push). */
   deliver: NotificationDeliverer
-  /** Resolve the currently active group id (settings store). */
-  getActiveGroupId: () => string | undefined
   /** Polling fallback cadence; defaults to {@link DEFAULT_POLL_INTERVAL_MS}. */
   pollIntervalMs?: number
 }
@@ -65,10 +67,9 @@ export class TaskWatcher {
   private readonly client: CoAgentHubClient
   private readonly ws: CoAgentHubWsClient
   private readonly deliver: NotificationDeliverer
-  private readonly getActiveGroupId: () => string | undefined
   private readonly pollIntervalMs: number
   private timer: ReturnType<typeof setInterval> | null = null
-  /** Last observed status per task id; baseline on first sight. */
+  /** Last observed status per task id (keyed by `groupId/taskId`); baseline on first sight. */
   private previousStatuses = new Map<string, string>()
   private nameById = new Map<string, string>()
 
@@ -76,7 +77,6 @@ export class TaskWatcher {
     this.client = options.client
     this.ws = options.ws
     this.deliver = options.deliver
-    this.getActiveGroupId = options.getActiveGroupId
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
   }
 
@@ -105,14 +105,16 @@ export class TaskWatcher {
     this.ws.stop()
   }
 
-  /** Route one WS frame to the matching notification type. */
+  /**
+   * Route one WS frame to the matching notification type. Frames are NOT
+   * filtered by the active group: every group's terminal event is enqueued so
+   * any session (identified by cwd) can later drain its own group's
+   * notifications without cross-group leakage.
+   */
   handleFrame(frame: WsEventFrame): void {
-    // 通知只属于当前 active group:其他群的帧(含未选群时的所有帧)直接忽略,
-    // 避免不同群的任务完成通知串到当前会话。
-    const activeGroupId = this.getActiveGroupId()
-    if (activeGroupId === undefined || activeGroupId.trim() === '') return
     const groupId = typeof frame.groupId === 'string' ? frame.groupId : undefined
-    if (groupId !== activeGroupId) return
+    // 无群归属的帧无法定位,直接忽略。
+    if (groupId === undefined || groupId.trim() === '') return
     const time = new Date().toISOString()
     switch (frame.type) {
       case 'group_message': {
@@ -120,7 +122,7 @@ export class TaskWatcher {
         return
       }
       case 'task_stall_alert': {
-        if (groupId === undefined || typeof frame.taskId !== 'string') return
+        if (typeof frame.taskId !== 'string') return
         this.deliver.deliver({
           type: 'task.stalled',
           groupId,
@@ -134,7 +136,7 @@ export class TaskWatcher {
       }
       case 'task_status_changed':
       case 'task_output': {
-        if (groupId === undefined || typeof frame.taskId !== 'string') return
+        if (typeof frame.taskId !== 'string') return
         const status = typeof frame.status === 'string' ? frame.status : undefined
         if (status === undefined) return
         // 只对终态(done/failed/stalled)投递通知;queued/running 等中间状态与
@@ -156,40 +158,50 @@ export class TaskWatcher {
     }
   }
 
-  /** Poll the active group's tasks once; notify on status transitions. */
+  /**
+   * Poll every group's tasks once (群数量少,逐群拉取成本可接受); notify on
+   * terminal status transitions. One group's failure does not affect the others.
+   */
   async pollOnce(): Promise<void> {
-    const groupId = this.getActiveGroupId()
-    if (groupId === undefined || groupId.trim() === '') return
-    let tasks: Task[]
+    let groups: Group[]
     try {
-      const [taskList, participants] = await Promise.all([
-        this.client.listTasks(groupId),
+      const [groupList, participants] = await Promise.all([
+        this.client.listGroups(100),
         this.client.listParticipants(),
       ])
-      tasks = taskList
+      groups = groupList.items
       this.nameById = new Map(participants.map(participant => [participant.id, participant.name]))
     } catch {
       return // 轮询失败静默,下一轮再试。
     }
     const time = new Date().toISOString()
-    for (const task of tasks) {
-      const prev = this.previousStatuses.get(task.id)
-      if (prev === task.status) continue
-      this.previousStatuses.set(task.id, task.status)
-      if (prev === undefined) continue // 首次见到:仅记录基线,不通知。
-      // 只对终态(done/failed/stalled)变化投递通知;queued/running 等中间状态
-      // 只更新基线,不投递。
-      if (task.status !== 'done' && task.status !== 'failed' && task.status !== 'stalled') continue
-      const summary = task.diffSummary?.summary ?? task.diffSummary?.error
-      this.deliver.deliver({
-        type: notificationTypeFor(task.status),
-        groupId,
-        taskId: task.id,
-        status: task.status,
-        executorName: this.nameById.get(task.executorParticipantId),
-        summary: summarize(summary),
-        time,
-      })
-    }
+    await Promise.all(groups.map(async (group) => {
+      let tasks: Task[]
+      try {
+        tasks = await this.client.listTasks(group.id)
+      } catch {
+        return // 单个群拉取失败不影响其他群。
+      }
+      for (const task of tasks) {
+        const key = `${group.id}/${task.id}`
+        const prev = this.previousStatuses.get(key)
+        if (prev === task.status) continue
+        this.previousStatuses.set(key, task.status)
+        if (prev === undefined) continue // 首次见到:仅记录基线,不通知。
+        // 只对终态(done/failed/stalled)变化投递通知;queued/running 等中间状态
+        // 只更新基线,不投递。
+        if (task.status !== 'done' && task.status !== 'failed' && task.status !== 'stalled') continue
+        const summary = task.diffSummary?.summary ?? task.diffSummary?.error
+        this.deliver.deliver({
+          type: notificationTypeFor(task.status),
+          groupId: group.id,
+          taskId: task.id,
+          status: task.status,
+          executorName: this.nameById.get(task.executorParticipantId),
+          summary: summarize(summary),
+          time,
+        })
+      }
+    }))
   }
 }

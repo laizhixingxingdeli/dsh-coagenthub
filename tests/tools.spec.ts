@@ -60,6 +60,11 @@ function execute(tool: ToolDefinition, args: Record<string, unknown>): Promise<u
   return tool.execute(args, {} as never)
 }
 
+/** Execute with an explicit session cwd (session header), overriding the process.cwd() fallback. */
+function executeWithCwd(tool: ToolDefinition, args: Record<string, unknown>, cwd: string): Promise<unknown> {
+  return tool.execute(args, { agent: { session: { header: { cwd } } } } as never)
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -841,12 +846,13 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     await expect(execute(tool, { groupId: 'g1', taskId: 't1', brief: 'x' })).rejects.toThrow(/无权限修改任务书/)
   })
 
-  it('get_notifications returns and clears the active group pending queue', async () => {
+  it('get_notifications returns and clears the resolved group pending queue', async () => {
     notificationQueue.drain() // 清空共享队列,避免用例间串扰
     notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
+    // cwd 未命中群时 fallback activeGroupId。
     const store = new CoAgentHubSettingsStore(null)
     store.set({ activeGroupId: 'g1' })
-    const client = clientWith(() => Promise.resolve([]))
+    const client = clientWith(() => Promise.resolve({ items: [group('g1', '群一')], total: 1 }))
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
     const first = (await execute(tool, {})) as Array<{ type: string; groupId: string }>
     expect(first).toEqual([expect.objectContaining({ type: 'task.completed', groupId: 'g1' })])
@@ -854,29 +860,71 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(second).toEqual([])
   })
 
-  it('get_notifications only returns the active group and keeps other groups queued', async () => {
+  it('get_notifications resolves the group from the session cwd and keeps other groups queued', async () => {
     notificationQueue.drain() // 清空共享队列,避免用例间串扰
     notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
     notificationQueue.enqueue({ type: 'task.failed', groupId: 'g2', taskId: 't2', status: 'failed', time: 't2' })
-    const store = new CoAgentHubSettingsStore(null)
-    store.set({ activeGroupId: 'g1' })
-    const client = clientWith(() => Promise.resolve([]))
-    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
-    const result = (await execute(tool, {})) as Array<{ groupId: string }>
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', '群一', 'active', '/repo/a'), group('g2', '群二', 'active', '/repo/b')],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await executeWithCwd(tool, {}, '/repo/a')) as Array<{ groupId: string }>
     expect(result).toEqual([expect.objectContaining({ groupId: 'g1' })])
     // 其他群的通知保留在队列里,不丢失。
     expect(notificationQueue.peek()).toEqual([expect.objectContaining({ groupId: 'g2' })])
     notificationQueue.drain()
   })
 
-  it('get_notifications returns nothing and clears nothing when no active group is selected', async () => {
+  it('sessions with different cwd only get their own group notifications', async () => {
+    notificationQueue.drain() // 清空共享队列,避免用例间串扰
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't1' })
+    notificationQueue.enqueue({ type: 'task.failed', groupId: 'g2', taskId: 't2', status: 'failed', time: 't2' })
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', '群一', 'active', '/repo/a'), group('g2', '群二', 'active', '/repo/b')],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    // 会话 A:cwd=/repo/a → 只取到 g1 的通知。
+    const fromA = (await executeWithCwd(tool, {}, '/repo/a')) as Array<{ groupId: string; taskId: string }>
+    expect(fromA).toEqual([expect.objectContaining({ groupId: 'g1', taskId: 't1' })])
+    // 会话 B:cwd=/repo/b → 只取到 g2 的通知。
+    const fromB = (await executeWithCwd(tool, {}, '/repo/b')) as Array<{ groupId: string; taskId: string }>
+    expect(fromB).toEqual([expect.objectContaining({ groupId: 'g2', taskId: 't2' })])
+    expect(notificationQueue.size).toBe(0)
+  })
+
+  it('get_notifications prefers the cwd lookup over the active group setting', async () => {
     notificationQueue.drain() // 清空共享队列,避免用例间串扰
     notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
-    const client = clientWith(() => Promise.resolve([]))
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g2' }) // 设置指向 g2,但 cwd 命中 g1
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', '群一', 'active', '/repo/a'), group('g2', '群二', 'active', '/repo/b')],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await executeWithCwd(tool, {}, '/repo/a')) as Array<{ groupId: string }>
+    expect(result).toEqual([expect.objectContaining({ groupId: 'g1' })])
+    notificationQueue.drain()
+  })
+
+  it('get_notifications returns nothing and clears nothing when no group resolves', async () => {
+    notificationQueue.drain() // 清空共享队列,避免用例间串扰
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
+    // cwd 未命中任何群,也没有 activeGroupId:返回空且不消费队列。
+    const client = clientWith(() =>
+      Promise.resolve({ items: [group('g1', '群一', 'active', '/repo/a')], total: 1 }),
+    )
     const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
-    const result = (await execute(tool, {})) as unknown[]
+    const result = (await executeWithCwd(tool, {}, '/other/repo')) as unknown[]
     expect(result).toEqual([])
-    // 未选群时不 drain,通知保留在队列里。
     expect(notificationQueue.size).toBe(1)
     notificationQueue.drain()
   })
@@ -893,11 +941,11 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       summary: '构建失败',
       time: 't2',
     })
-    const store = new CoAgentHubSettingsStore(null)
-    store.set({ activeGroupId: 'g1' })
-    const client = clientWith(() => Promise.resolve([]))
-    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
-    const result = (await execute(tool, {})) as Array<Record<string, unknown>>
+    const client = clientWith(() =>
+      Promise.resolve({ items: [group('g1', '群一', 'active', '/repo/a')], total: 1 }),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await executeWithCwd(tool, {}, '/repo/a')) as Array<Record<string, unknown>>
     expect(result).toEqual([
       { type: 'message.received', groupId: 'g1', taskId: null, status: null, executorName: null, summary: null, time: 't' },
       {
