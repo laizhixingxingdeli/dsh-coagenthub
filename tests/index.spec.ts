@@ -100,13 +100,35 @@ describe('resolveGroupIdForCwd', () => {
     expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, undefined)).toBe('g1')
   })
 
+  it('prefers the stored activeGroupId over the cwd-matched group', () => {
+    const settings = { activeGroupId: 'g1' }
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/other-repo', groups, settings)).toBe('g1')
+  })
+
+  it('resolves the stored activeGroupId even when the session has no usable cwd', () => {
+    const settings = { activeGroupId: 'g2' }
+    expect(resolveGroupIdForCwd(undefined, groups, settings)).toBe('g2')
+    expect(resolveGroupIdForCwd(null, groups, settings)).toBe('g2')
+    expect(resolveGroupIdForCwd('   ', groups, settings)).toBe('g2')
+  })
+
   it('falls back to the active group setting when cwd matches no group', () => {
     const settings = { activeGroupId: 'g2' }
     expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/unmapped', groups, settings)).toBe('g2')
   })
 
+  it('falls back to the cwd-matched group when the stored activeGroupId no longer exists', () => {
+    const settings = { activeGroupId: 'ghost' }
+    expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/dsh-coagenthub', groups, settings)).toBe('g1')
+  })
+
   it('returns null when cwd matches no group and no active group is set', () => {
     expect(resolveGroupIdForCwd('/Users/apple/Desktop/Projects/unmapped', groups, undefined)).toBeNull()
+  })
+
+  it('returns null when the activeGroupId is set but missing from groups and cwd is unusable', () => {
+    const settings = { activeGroupId: 'ghost' }
+    expect(resolveGroupIdForCwd(undefined, groups, settings)).toBeNull()
   })
 
   it('returns null when the session has no usable cwd', () => {

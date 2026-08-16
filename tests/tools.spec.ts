@@ -200,11 +200,14 @@ describe('createCoAgentHubTools', () => {
     expect(listGroups).not.toHaveBeenCalled()
   })
 
-  it('dispatch_task falls back to the active group when groupId is omitted and cwd matches no group', async () => {
+  it('dispatch_task uses the stored activeGroupId when groupId is omitted and it exists in the group list', async () => {
     const store = new CoAgentHubSettingsStore(null)
     store.set({ activeGroupId: 'g1' })
     const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
-    const listGroups = vi.fn().mockResolvedValue({ items: [], total: 0 })
+    const listGroups = vi.fn().mockResolvedValue({
+      items: [{ id: 'g1', title: '手动保存群', status: 'active' }],
+      total: 1,
+    })
     const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
       if (String(url).endsWith('/participants')) {
         return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
@@ -222,7 +225,36 @@ describe('createCoAgentHubTools', () => {
     expect(String(url)).toContain('/groups/g1/messages')
   })
 
-  it('dispatch_task prefers the cwd-matched group over the stored activeGroupId', async () => {
+  it('dispatch_task prefers the stored activeGroupId over the cwd-matched group', async () => {
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g1' })
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/groups?limit=100')) {
+        return Promise.resolve({
+          items: [
+            { id: 'g1', title: '手动保存群', status: 'active' },
+            { id: 'g9', title: 'dsh-coagenthub 插件开发', status: 'active', projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub' },
+          ],
+          total: 2,
+        })
+      }
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_dispatch_task')!
+    // cwd 命中 g9,但手动保存的 activeGroupId g1 优先生效。
+    const result = (await tool.execute({ body: '任务' }, {
+      agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
+    } as never)) as Record<string, unknown>
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+    const [url] = postMessage.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/groups/g1/messages')
+  })
+
+  it('dispatch_task falls back to the cwd-matched group when the stored activeGroupId no longer exists', async () => {
     const store = new CoAgentHubSettingsStore(null)
     store.set({ activeGroupId: 'g1' })
     const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
@@ -239,6 +271,7 @@ describe('createCoAgentHubTools', () => {
       return postMessage(url, init)
     })
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_dispatch_task')!
+    // 存储的 g1 已不在群列表中(视为未设置),cwd 反查兜底命中 g9。
     const result = (await tool.execute({ body: '任务' }, {
       agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>
@@ -396,7 +429,7 @@ describe('createCoAgentHubTools', () => {
     }
   })
 
-  it('list_tasks auto-backfills the activeGroupId when groupId is omitted and cwd matches no group', async () => {
+  it('list_tasks uses the stored activeGroupId when groupId is omitted and it exists in the group list', async () => {
     const store = new CoAgentHubSettingsStore(null)
     store.set({ activeGroupId: 'g1' })
     const client = clientWith((url: string | URL | Request) => {
@@ -406,7 +439,10 @@ describe('createCoAgentHubTools', () => {
       if (String(url).includes('/tasks')) {
         return Promise.resolve([])
       }
-      return Promise.resolve({ items: [], total: 0 })
+      return Promise.resolve({
+        items: [{ id: 'g1', title: '手动保存群', status: 'active' }],
+        total: 1,
+      })
     })
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_list_tasks')!
     const result = (await execute(tool, {})) as Array<{ groupId: string }>
@@ -416,7 +452,7 @@ describe('createCoAgentHubTools', () => {
     expect(tasksUrl).toContain('/groups/g1/tasks')
   })
 
-  it('list_tasks prefers the cwd-matched group over the stored activeGroupId', async () => {
+  it('list_tasks falls back to the cwd-matched group when the stored activeGroupId no longer exists', async () => {
     const store = new CoAgentHubSettingsStore(null)
     store.set({ activeGroupId: 'g1' })
     const client = clientWith((url: string | URL | Request) => {
@@ -990,7 +1026,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
   it('get_notifications returns and clears the resolved group pending queue', async () => {
     notificationQueue.drain() // 清空共享队列,避免用例间串扰
     notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
-    // cwd 未命中群时 fallback activeGroupId。
+    // activeGroupId g1 存在于群列表,优先生效(cwd 未命中也没关系)。
     const store = new CoAgentHubSettingsStore(null)
     store.set({ activeGroupId: 'g1' })
     const client = clientWith(() => Promise.resolve({ items: [group('g1', '群一')], total: 1 }))
@@ -1039,11 +1075,31 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(notificationQueue.size).toBe(0)
   })
 
-  it('get_notifications prefers the cwd lookup over the active group setting', async () => {
+  it('get_notifications prefers the stored activeGroupId over the cwd lookup', async () => {
+    notificationQueue.drain() // 清空共享队列,避免用例间串扰
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
+    notificationQueue.enqueue({ type: 'task.failed', groupId: 'g2', taskId: 't2', status: 'failed', time: 't2' })
+    const store = new CoAgentHubSettingsStore(null)
+    store.set({ activeGroupId: 'g2' }) // 设置指向 g2;cwd 命中 g1,但手动保存的 g2 优先
+    const client = clientWith(() =>
+      Promise.resolve({
+        items: [group('g1', '群一', 'active', '/repo/a'), group('g2', '群二', 'active', '/repo/b')],
+        total: 2,
+      }),
+    )
+    const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
+    const result = (await executeWithCwd(tool, {}, '/repo/a')) as Array<{ groupId: string; taskId: string }>
+    expect(result).toEqual([expect.objectContaining({ groupId: 'g2', taskId: 't2' })])
+    // 其他群(g1)的通知保留在队列里,不丢失。
+    expect(notificationQueue.peek()).toEqual([expect.objectContaining({ groupId: 'g1' })])
+    notificationQueue.drain()
+  })
+
+  it('get_notifications falls back to the cwd lookup when the stored activeGroupId no longer exists', async () => {
     notificationQueue.drain() // 清空共享队列,避免用例间串扰
     notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 't' })
     const store = new CoAgentHubSettingsStore(null)
-    store.set({ activeGroupId: 'g2' }) // 设置指向 g2,但 cwd 命中 g1
+    store.set({ activeGroupId: 'ghost' }) // 存储的群已不在群列表中,视为未设置
     const client = clientWith(() =>
       Promise.resolve({
         items: [group('g1', '群一', 'active', '/repo/a'), group('g2', '群二', 'active', '/repo/b')],
@@ -1052,7 +1108,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     )
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_notifications')!
     const result = (await executeWithCwd(tool, {}, '/repo/a')) as Array<{ groupId: string }>
-    expect(result).toEqual([expect.objectContaining({ groupId: 'g1' })])
+    expect(result).toEqual([expect.objectContaining({ groupId: 'g1', taskId: 't1' })])
     notificationQueue.drain()
   })
 
@@ -1166,6 +1222,28 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     }
   })
 
+  it('get_workspace_instructions prefers the stored activeGroupId over cwd and reads the group local path', async () => {
+    const groupDir = mkdtempSync(join(tmpdir(), 'coagenthub-ws-group-'))
+    const cwdDir = mkdtempSync(join(tmpdir(), 'coagenthub-ws-cwd-'))
+    try {
+      writeFileSync(join(groupDir, 'COAGENTHUB.md'), '选中群指令')
+      writeFileSync(join(cwdDir, 'COAGENTHUB.md'), 'cwd 指令(不应被读取)')
+      const store = new CoAgentHubSettingsStore(null)
+      store.set({ activeGroupId: 'g1' })
+      const client = clientWith(() =>
+        Promise.resolve({ items: [group('g1', '手动保存群', 'active', groupDir)], total: 1 }),
+      )
+      const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_workspace_instructions')!
+      const result = (await tool.execute({}, {
+        agent: { session: { header: { cwd: cwdDir } } },
+      } as never)) as Record<string, unknown>
+      expect(result).toEqual({ groupId: 'g1', groupTitle: '手动保存群', instructions: '选中群指令' })
+    } finally {
+      rmSync(groupDir, { recursive: true, force: true })
+      rmSync(cwdDir, { recursive: true, force: true })
+    }
+  })
+
   it('get_workspace_instructions returns instructions null in a non-plugin workspace', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagenthub-empty-'))
     try {
@@ -1180,7 +1258,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     }
   })
 
-  it('get_active_group projects winPath and reads instructions', async () => {
+  it('get_active_group projects winPath for the selected group and does not read instructions from the unrelated cwd', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagenthub-active-'))
     try {
       writeFileSync(join(dir, 'COAGENTHUB.md'), '工作区指令')
@@ -1201,10 +1279,40 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
         groupTitle: 'dsh-coagenthub 插件开发',
         projectPath: '/Users/apple/Desktop/Projects/dsh-coagenthub',
         winPath: 'Z:\\dsh-coagenthub',
-        instructions: '工作区指令',
       }))
+      // activeGroupId 优先生效时 instructions 从选中群本地路径读:winPath
+      // Z:\dsh-coagenthub 在本机不可读 → null,绝不读与选中群无关的会话 cwd。
+      expect(result.instructions).toBeNull()
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('get_active_group reads instructions from the selected group local path, not the unrelated session cwd', async () => {
+    const groupDir = mkdtempSync(join(tmpdir(), 'coagenthub-group-'))
+    const cwdDir = mkdtempSync(join(tmpdir(), 'coagenthub-cwd-'))
+    try {
+      writeFileSync(join(groupDir, 'COAGENTHUB.md'), '选中群指令')
+      writeFileSync(join(cwdDir, 'COAGENTHUB.md'), 'cwd 指令(不应被读取)')
+      const store = new CoAgentHubSettingsStore(null)
+      store.set({ activeGroupId: 'g1' })
+      const client = clientWith(() =>
+        Promise.resolve({ items: [group('g1', '手动保存群', 'active', groupDir)], total: 1 }),
+      )
+      const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+      const result = (await tool.execute({}, {
+        agent: { session: { header: { cwd: cwdDir } } },
+      } as never)) as Record<string, unknown>
+      expect(result).toEqual(expect.objectContaining({
+        groupId: 'g1',
+        groupTitle: '手动保存群',
+        projectPath: groupDir,
+        winPath: null,
+        instructions: '选中群指令',
+      }))
+    } finally {
+      rmSync(groupDir, { recursive: true, force: true })
+      rmSync(cwdDir, { recursive: true, force: true })
     }
   })
 
@@ -1286,7 +1394,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     }))
   })
 
-  it('get_active_group prefers the cwd-matched group over the stored activeGroupId', async () => {
+  it('get_active_group falls back to the cwd-matched group when the stored activeGroupId no longer exists', async () => {
     const store = new CoAgentHubSettingsStore(null)
     store.set({ activeGroupId: 'g1' })
     const client = clientWith(() =>
@@ -1296,6 +1404,7 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       }),
     )
     const tool = createCoAgentHubTools(client, store).find(t => t.name === 'coagenthub_get_active_group')!
+    // 存储的 g1 已不在群列表中(视为未设置),cwd 反查兜底命中 g9。
     const result = (await tool.execute({}, {
       agent: { session: { header: { cwd: '/Users/apple/Desktop/Projects/dsh-coagenthub' } } },
     } as never)) as Record<string, unknown>

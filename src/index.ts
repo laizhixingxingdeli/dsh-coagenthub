@@ -31,27 +31,26 @@ export interface CoAgentHubPluginConfig {
 }
 
 /**
- * 推送侧会话→群解析(纯函数,便于单测):cwd 非空时与拉取侧
- * `coagenthub_get_notifications`(tools.ts)一致——先用会话 cwd 调
- * findGroupByWorkspaceCwd 反查群,反查不到再回退 `settings.activeGroupId`。
- * 与拉取侧的刻意差异:cwd 为空(会话没有可用工作目录)时直接返回 null——按
- * 任务需求 3,拿不到 cwd 即回退"禁用主动推送、全部入队",由各会话按 cwd
- * 拉取;拉取侧还会继续兜底 process.cwd()/activeGroupId,但推送侧不确定归属
- * 群时宁可入队,也不把其他群的通知注入当前会话。
+ * 推送侧会话→群解析(纯函数,便于单测):与拉取侧
+ * `coagenthub_get_notifications`(tools.ts)一致——先看 `settings.activeGroupId`:
+ * 非空且能在 groups 中找到时直接使用(手动保存的工作区优先生效);否则按会话
+ * cwd 调 findGroupByWorkspaceCwd 反查群,反查不到再返回 null。
+ * 与拉取侧的刻意差异:activeGroupId 与 cwd 都拿不到归属群时直接返回 null——按
+ * 任务需求 3,不确定归属群时回退"禁用主动推送、全部入队",由各会话按需拉取;
+ * 绝不把其他群的通知注入当前会话。
  */
 export function resolveGroupIdForCwd(
   cwd: string | null | undefined,
   groups: readonly GroupWithPath[],
   settings: CoAgentHubSettings | undefined,
 ): string | null {
-  if (cwd === null || cwd === undefined || cwd.trim() === '') return null
-  const byCwd = findGroupByWorkspaceCwd(groups, cwd, settings?.mappingRule)
-  if (byCwd !== null) return byCwd.id
   const activeGroupId = settings?.activeGroupId
   if (activeGroupId !== undefined && activeGroupId.trim() !== '') {
-    return groups.find(group => group.id === activeGroupId)?.id ?? null
+    const active = groups.find(group => group.id === activeGroupId)
+    if (active !== undefined) return active.id
   }
-  return null
+  if (cwd === null || cwd === undefined || cwd.trim() === '') return null
+  return findGroupByWorkspaceCwd(groups, cwd, settings?.mappingRule)?.id ?? null
 }
 
 /** 会话→群反查结果缓存条目。 */
@@ -90,8 +89,9 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   ctx.effect(() => {
     // 工具的 live root agent cwd 回退解析器:晚绑定 agentsRegistry(由下方
     // ctx.inject(['agents']) 接线后赋值),解析器只在被调用时现查
-    // registry.roots()[0] 的会话目录;agents 服务未接线/已下线时返回 null,
-    // 工具层拿不到会话 cwd 即回退 settings.activeGroupId,绝不误用 process.cwd()。
+    // registry.roots()[0] 的会话目录;agents 服务未接线/已下线时返回 null。
+    // 工具层解析群时优先 settings.activeGroupId(手动保存的工作区),cwd 仅在
+    // activeGroupId 未设置/已失效时兜底,绝不误用 process.cwd()。
     return registerCoAgentHubTools(ctx, client, settingsStore, () => {
       const agent = agentsRegistry?.roots()[0]
       // 与推送侧 resolveSessionGroupId 一致:header.cwd 优先,旧结构 meta.cwd 兜底。
@@ -139,11 +139,12 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     ctx.logger?.('coagenthub').info('dsh 运行时支持主动唤醒(agent.followup),通知将直接推送进会话并唤醒 driver')
     deliverer.setPushAdapter(new DshAgentPushAdapter({
       resolveAgent: () => registry.roots()[0],
-      // 推送前按会话 cwd 反查群隔离:agent.session.header.cwd(dsh-session
-      // SessionHeader)是会话创建时的绝对工作目录,旧结构回退 meta.cwd;用它
-      // 反查当前会话对应的群,只把该群的通知 followup 推入本会话,其他群的
-      // 通知由适配器入队隔离,避免 0.0.16 后 TaskWatcher 收集到的其他群通知
-      // 被注入当前会话。
+      // 推送前按 activeGroupId → 会话 cwd 反查的顺序解析群隔离:手动保存的
+      // activeGroupId(非空且存在于群列表)优先生效;否则用
+      // agent.session.header.cwd(dsh-session SessionHeader)反查——它是会话创建
+      // 时的绝对工作目录,旧结构回退 meta.cwd。只把该群的通知 followup 推入
+      // 本会话,其他群的通知由适配器入队隔离,避免 0.0.16 后 TaskWatcher 收集
+      // 到的其他群通知被注入当前会话。
       // 会话→群反查结果按 agent 会话 + settings 缓存(TTL 内复用),避免每条
       // 通知都打一次 listGroups HTTP(接口慢/挂时最坏卡 10s,通知悬在"既未
       // 入队也未推送"状态);反查失败也缓存为 null,通知立即入队由
@@ -165,21 +166,16 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
         const inflight = sessionGroupInflight.get(cacheKey)
         if (inflight !== undefined) return inflight
         const pending = (async (): Promise<string | null> => {
-          let groupId: string | null = null
-          if (agent !== undefined) {
-            // 与拉取侧 workspaceRootFromExec 一致:header.cwd 优先,旧结构 meta.cwd 兜底。
-            const session = agent.session as { header?: { cwd?: string }; meta?: { cwd?: string } } | undefined
-            const cwd = session?.header?.cwd ?? session?.meta?.cwd
-            if (cwd !== undefined && cwd !== null && cwd.trim() !== '') {
-              try {
-                const groups = await withTimeout(client.listGroups(100), SESSION_GROUP_RESOLVE_TIMEOUT_MS)
-                groupId = resolveGroupIdForCwd(cwd, groups.items, settings)
-              } catch {
-                groupId = null // 反查失败/超时:本轮全部入队,由 get_notifications 补读。
-              }
-            }
+          if (agent === undefined) return null
+          // 与拉取侧 workspaceRootFromExec 一致:header.cwd 优先,旧结构 meta.cwd 兜底。
+          const session = agent.session as { header?: { cwd?: string }; meta?: { cwd?: string } } | undefined
+          const cwd = session?.header?.cwd ?? session?.meta?.cwd
+          try {
+            const groups = await withTimeout(client.listGroups(100), SESSION_GROUP_RESOLVE_TIMEOUT_MS)
+            return resolveGroupIdForCwd(cwd, groups.items, settings)
+          } catch {
+            return null // 反查失败/超时:本轮全部入队,由 get_notifications 补读。
           }
-          return groupId
         })().then((groupId) => {
           // 填充新条目时顺带驱逐过期条目,避免会话/设置变化产生的 key 无限累积。
           const now = Date.now()

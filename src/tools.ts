@@ -10,9 +10,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { CoAgentHubClient, CoAgentHubError, CoAgentHubFetchError } from './client.ts'
 import type { Message, Participant } from './client.ts'
-import type { CoAgentHubSettingsStore } from './config.ts'
+import type { CoAgentHubSettings, CoAgentHubSettingsStore } from './config.ts'
 import { notificationQueue } from './notification-queue.ts'
 import { buildTaskBook } from './task-book.ts'
+import type { GroupWithPath } from './workspace.ts'
 import { findGroupByWorkspaceCwd, groupProjectWinPath } from './workspace.ts'
 import type { LiveAgentCwdResolver } from './workspace-instructions.ts'
 import { readWorkspaceInstructions, workspaceRootFromExec } from './workspace-instructions.ts'
@@ -85,17 +86,19 @@ function serverErrorMessage(error: CoAgentHubError): string {
 }
 
 const GROUP_ID_DESCRIPTION =
-  'Target group id. 可选:不传时自动回填(当前工作区 cwd 反查 → activeGroupId 兜底)。'
+  'Target group id. 可选:不传时自动回填(activeGroupId 优先 → 当前工作区 cwd 反查兜底)。'
 
 /**
- * Resolve the group a tool should operate on: an explicit groupId wins, then a
- * cwd-based backfill through the workspace mapping, then the stored
- * activeGroupId as a last fallback. Throws a clear error when nothing
- * resolves so the agent passes an explicit groupId.
+ * Resolve the group a workspace tool should operate on: an explicit groupId
+ * wins, then the stored activeGroupId when it is set and still exists in the
+ * group list (手动保存的工作区优先生效), then a cwd-based backfill through the
+ * workspace mapping. Throws a clear error when nothing resolves so the agent
+ * passes an explicit groupId.
  *
  * 会话 cwd 统一解析:exec agent 优先,exec 拿不到时回退 live root agent
  * (resolveLiveAgentCwd,见 workspaceRootFromExec)——绝不回退 process.cwd(),
- * 避免常驻 web 进程把会话误判到 dsh 启动目录绑定的群。
+ * 避免常驻 web 进程把会话误判到 dsh 启动目录绑定的群。activeGroupId 在
+ * groups 里找不到时视为未设置(群可能被删除/换库),继续 cwd 兜底,不抛错。
  */
 async function resolveGroupId(
   args: { groupId?: string },
@@ -104,16 +107,50 @@ async function resolveGroupId(
   settingsStore: CoAgentHubSettingsStore | undefined,
   resolveLiveAgentCwd?: LiveAgentCwdResolver,
 ): Promise<string> {
-  const settings = settingsStore?.get()
   if (args.groupId !== undefined && args.groupId.trim() !== '') return args.groupId
-  const matched = findGroupByWorkspaceCwd(
-    (await client.listGroups(100)).items,
-    workspaceRootFromExec(exec, resolveLiveAgentCwd),
-    settings?.mappingRule,
-  )
-  if (matched !== null) return matched.id
-  if (settings?.activeGroupId !== undefined && settings.activeGroupId.trim() !== '') return settings.activeGroupId
+  const settings = settingsStore?.get()
+  const groups = (await client.listGroups(100)).items
+  const group = resolveWorkspaceGroup(groups, settings, workspaceRootFromExec(exec, resolveLiveAgentCwd))
+  if (group !== null) return group.id
   throw new Error('未指定 groupId，且无法从当前工作区识别群；请手动传 groupId')
+}
+
+/**
+ * Resolve the group a workspace tool should operate on: the stored
+ * activeGroupId wins when it is set and still exists in the group list
+ * (手动保存的工作区优先生效);otherwise fall back to the session cwd backfill
+ * through the workspace mapping. Null when nothing resolves.
+ *
+ * activeGroupId 不存在于 groups 时视为未设置(群可能被删除/换库),继续 cwd 兜底,
+ * 不抛错——与「自动(按 cwd)」语义一致。
+ */
+function resolveWorkspaceGroup(
+  groups: readonly GroupWithPath[],
+  settings: CoAgentHubSettings | undefined,
+  cwd: string | null,
+): GroupWithPath | null {
+  const activeGroupId = settings?.activeGroupId
+  if (activeGroupId !== undefined && activeGroupId.trim() !== '') {
+    const active = groups.find(candidate => candidate.id === activeGroupId)
+    if (active !== undefined) return active
+  }
+  return findGroupByWorkspaceCwd(groups, cwd, settings?.mappingRule)
+}
+
+/**
+ * 读 workspace instructions 用的本地根路径:优先选中群的 winPath(映射后的本地
+ * 路径),其次该群 projectPath,两者都拿不到(群未绑定路径)才退回会话 cwd。确保
+ * activeGroupId 优先生效时不从与选中群无关的会话 cwd 读取 COAGENTHUB.md。
+ */
+function workspaceInstructionsRoot(
+  group: GroupWithPath,
+  settings: CoAgentHubSettings | undefined,
+  cwdFallback: string | null,
+): string | null {
+  const winPath = groupProjectWinPath(group.projectPath, settings?.mappingRule)
+  if (winPath !== null && winPath.trim() !== '') return winPath
+  if (group.projectPath !== null && group.projectPath !== undefined && group.projectPath.trim() !== '') return group.projectPath
+  return cwdFallback
 }
 
 /**
@@ -459,9 +496,9 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_dispatch_task',
       description:
-        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时按当前工作区 cwd 反查匹配群,否则用活动群(activeGroupId)兜底;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。',
+        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时优先用已保存的活动群(activeGroupId,须在群列表中),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。',
       parameters: {
-        groupId: { type: 'string', description: 'Target group id. 可选:不传时自动回填(当前工作区 cwd 反查 → activeGroupId 兜底)。' },
+        groupId: { type: 'string', description: 'Target group id. 可选:不传时自动回填(activeGroupId 优先 → 当前工作区 cwd 反查兜底)。' },
         body: { type: 'string', required: true, description: 'Task brief sent to the executor (plain text, kept verbatim).' },
         executorName: {
           type: 'string',
@@ -500,7 +537,8 @@ export function createCoAgentHubTools(
         priority?: string
         dependencies?: string
       }, exec: ToolRunContext) {
-        // groupId 可选:显式传值优先,否则依次用当前工作区 cwd 反查、activeGroupId 兜底。
+        // groupId 可选:显式传值优先,否则依次用 activeGroupId(须在群列表中)、
+        // 当前工作区 cwd 反查自动回填。
         const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd)
         const executor = await resolveExecutor(client, args.executorName)
         const taskBook = buildTaskBook({
@@ -591,7 +629,7 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_get_active_group',
       description:
-        'Resolve the CoAgentHub virtual workspace for the current session: the group matched from the session cwd via the workspace mapping, falling back to the group selected in the panel 当前工作区 dropdown (activeGroupId) when cwd matches nothing. Returns { groupId, groupTitle, projectPath?, winPath?, instructions? }; null when nothing resolves. Useful to scope a task or message to the user\'s workspace group.',
+        'Resolve the CoAgentHub virtual workspace for the current session: the group selected in the panel 当前工作区 dropdown (activeGroupId) takes precedence when it is set and exists in the group list; otherwise fall back to the group matched from the session cwd via the workspace mapping. instructions 从实际选中群的本地路径读取(优先 winPath,其次 projectPath,拿不到再退回会话 cwd)。Returns { groupId, groupTitle, projectPath?, winPath?, instructions? }; null when nothing resolves. Useful to scope a task or message to the user\'s workspace group.',
       parameters: {},
       output: {
         schema: {
@@ -614,17 +652,14 @@ export function createCoAgentHubTools(
       },
       async execute(_args: Record<string, never>, exec: ToolRunContext) {
         try {
+          // 解析优先级:activeGroupId(非空且存在于群列表)优先 → 会话 cwd 反查兜底。
           const settings = settingsStore?.get()
-          const activeGroupId = settings?.activeGroupId
           const cwd = workspaceRootFromExec(exec, resolveLiveAgentCwd)
           const groups = await client.listGroups(100)
-          const group = findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule)
-            ?? (activeGroupId !== undefined && activeGroupId.trim() !== ''
-              ? groups.items.find(candidate => candidate.id === activeGroupId) ?? undefined
-              : undefined)
-          if (group === undefined) return null
+          const group = resolveWorkspaceGroup(groups.items, settings, cwd)
+          if (group === null) return null
           const winPath = groupProjectWinPath(group.projectPath, settings?.mappingRule)
-          const instructions = await readWorkspaceInstructions(cwd)
+          const instructions = await readWorkspaceInstructions(workspaceInstructionsRoot(group, settings, cwd))
           return {
             groupId: group.id,
             groupTitle: group.title,
@@ -641,7 +676,7 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_get_workspace_instructions',
       description:
-        'Return the workspace-level instructions for the current session: reads COAGENTHUB.md from the current dsh workspace root and pairs it with the group resolved from the session cwd (falling back to the active group id/title). 非插件工作区(无 COAGENTHUB.md)返回 instructions: null.',
+        'Return the workspace-level instructions for the current session: pairs the group resolved via the stored activeGroupId (falling back to the session cwd) and reads COAGENTHUB.md from the resolved group\'s local path (优先 winPath,其次 projectPath,拿不到再退回会话 cwd)。非插件工作区(无 COAGENTHUB.md)返回 instructions: null.',
       parameters: {},
       output: {
         schema: {
@@ -657,22 +692,19 @@ export function createCoAgentHubTools(
       },
       async execute(_args: Record<string, never>, exec: ToolRunContext) {
         try {
+          // 解析优先级:activeGroupId(非空且存在于群列表)优先 → 会话 cwd 反查兜底。
           const settings = settingsStore?.get()
-          const activeGroupId = settings?.activeGroupId
           const cwd = workspaceRootFromExec(exec, resolveLiveAgentCwd)
-          let groupId: string | null = null
-          let groupTitle: string | null = null
           const groups = await client.listGroups(100)
-          const group = findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule)
-            ?? (activeGroupId !== undefined && activeGroupId.trim() !== ''
-              ? groups.items.find(candidate => candidate.id === activeGroupId) ?? undefined
-              : undefined)
-          if (group !== undefined) {
-            groupId = group.id
-            groupTitle = group.title
+          const group = resolveWorkspaceGroup(groups.items, settings, cwd)
+          // 解析到群时从选中群本地路径读;解析不到群(自动模式也无 cwd 匹配)时退回会话 cwd。
+          const instructionsRoot = group === null ? cwd : workspaceInstructionsRoot(group, settings, cwd)
+          const instructions = await readWorkspaceInstructions(instructionsRoot)
+          return {
+            groupId: group?.id ?? null,
+            groupTitle: group?.title ?? null,
+            instructions,
           }
-          const instructions = await readWorkspaceInstructions(cwd)
-          return { groupId, groupTitle, instructions }
         } catch (error) {
           throwToolError(error, '工作区指令不可用(404)')
         }
@@ -1004,23 +1036,19 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_get_notifications',
       description:
-        'Return and clear the pending CoAgentHub notifications for the group resolved from the current session workspace (cwd → group; falls back to the active group setting). Notifications from other groups stay queued and do not leak into the current workspace. Use to catch up on background events instead of polling.',
+        'Return and clear the pending CoAgentHub notifications for the group resolved from the stored activeGroupId when set and valid (falling back to the session cwd → group backfill). Notifications from other groups stay queued and do not leak into the current workspace. Use to catch up on background events instead of polling.',
       parameters: {},
       output: { schema: { type: 'array', items: NOTIFICATION_VIEW_SCHEMA } as const, render: renderValue },
       async execute(_args: Record<string, never>, exec: ToolRunContext) {
         try {
-          // 通知按会话 cwd 反查群隔离:优先 cwd → 群,fallback settingsStore.activeGroupId。
-          // 只 drain 该群的通知,其他群的通知保留在队列里(不会串到当前会话也不会丢失);
+          // 通知按 activeGroupId → 会话 cwd 反查的顺序隔离群:手动保存的工作区
+          // 优先(须存在于群列表),未设置/已失效才按 cwd 反查;只 drain 该群的
+          // 通知,其他群的通知保留在队列里(不会串到当前会话也不会丢失);
           // 反查不到群时返回空且不消费队列。
           const settings = settingsStore?.get()
           const cwd = workspaceRootFromExec(exec, resolveLiveAgentCwd)
           const groups = await client.listGroups(100)
-          const byCwd = findGroupByWorkspaceCwd(groups.items, cwd, settings?.mappingRule)
-          const activeGroupId = settings?.activeGroupId
-          const group = byCwd
-            ?? (activeGroupId !== undefined && activeGroupId.trim() !== ''
-              ? groups.items.find(candidate => candidate.id === activeGroupId) ?? null
-              : null)
+          const group = resolveWorkspaceGroup(groups.items, settings, cwd)
           if (group === null) return []
           const pending = notificationQueue.drainByGroup(group.id)
           // 归一化:drain() 结果中缺省的 taskId/status/executorName/summary 补 null,
