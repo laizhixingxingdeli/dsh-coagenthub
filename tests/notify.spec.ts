@@ -120,6 +120,129 @@ describe('DshAgentPushAdapter', () => {
     expect(notificationQueue.size).toBe(1)
     expect(notificationQueue.drain()[0]).toMatchObject({ taskId: 't1' })
   })
+
+  it('routes by dispatcherSessionId to the matching live agent without enqueueing', async () => {
+    const dispatcher = agentStub('agent-dispatcher')
+    const root = agentStub('agent-root')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => asAgent(root),
+      resolveAgentBySessionId: sessionId => (sessionId === 'session-x' ? asAgent(dispatcher) : undefined),
+    })
+
+    await adapter.push(makeNotification({ dispatcherSessionId: 'session-x' }))
+
+    // 定向命中:推送到下发会话,root agent 不参与,队列为空(推送成功不入队)。
+    expect(dispatcher.followup).toHaveBeenCalledTimes(1)
+    expect(root.followup).not.toHaveBeenCalled()
+    expect(notificationQueue.size).toBe(0)
+    const message = dispatcher.followup.mock.calls[0]![0] as { content: Array<{ text: string }> }
+    expect(message.content[0]!.text).toContain('任务完成')
+  })
+
+  it('dispatcher-session routing bypasses session-group filtering', async () => {
+    const dispatcher = agentStub('agent-dispatcher')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => undefined,
+      resolveSessionGroupId: () => 'other-group', // 群级过滤会说"不属于本会话"
+      resolveAgentBySessionId: () => asAgent(dispatcher),
+    })
+
+    await adapter.push(makeNotification({ groupId: 'g1', dispatcherSessionId: 'session-x' }))
+
+    // dispatcherSessionId 是权威目标:即使群级过滤不匹配也直接推送,不入队。
+    expect(dispatcher.followup).toHaveBeenCalledTimes(1)
+    expect(notificationQueue.size).toBe(0)
+  })
+
+  it('falls back to participant+group routing when dispatcherSessionId cannot be resolved', async () => {
+    const byParticipant = agentStub('agent-by-participant')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => undefined,
+      resolveAgentBySessionId: () => undefined, // dispatcherSessionId 找不到
+      resolveAgentByParticipantId: (participantId, groupId) =>
+        participantId === 'p1' && groupId === 'g1' ? asAgent(byParticipant) : undefined,
+    })
+
+    await adapter.push(makeNotification({ dispatcherSessionId: 'session-x', dispatcherParticipantId: 'p1' }))
+
+    expect(byParticipant.followup).toHaveBeenCalledTimes(1)
+    expect(notificationQueue.size).toBe(0)
+  })
+
+  it('awaits an async participant resolver before falling back', async () => {
+    const byParticipant = agentStub('agent-async')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => undefined,
+      resolveAgentBySessionId: () => undefined,
+      resolveAgentByParticipantId: async (participantId, groupId) => {
+        if (participantId === 'p1' && groupId === 'g1') return asAgent(byParticipant)
+        return undefined
+      },
+    })
+
+    await adapter.push(makeNotification({ dispatcherSessionId: 's1', dispatcherParticipantId: 'p1' }))
+
+    expect(byParticipant.followup).toHaveBeenCalledTimes(1)
+    expect(notificationQueue.size).toBe(0)
+  })
+
+  it('treats a rejecting participant resolver as not-found and falls back to the group path', async () => {
+    const root = agentStub('agent-root')
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => asAgent(root),
+      resolveAgentBySessionId: () => undefined,
+      resolveAgentByParticipantId: () => Promise.reject(new Error('registry down')),
+    })
+
+    // participant 解析抛错视为找不到:回退群级路径(root 命中 → 推送成功)。
+    await adapter.push(makeNotification({ dispatcherSessionId: 's1', dispatcherParticipantId: 'p1' }))
+
+    expect(root.followup).toHaveBeenCalledTimes(1)
+    expect(notificationQueue.size).toBe(0)
+  })
+
+  it('enqueues when dispatcher routes miss and the group fallback has no live agent', async () => {
+    const deliverer = createNotificationDeliverer(new DshAgentPushAdapter({
+      resolveAgent: () => undefined, // 群级 fallback 也无 live agent
+      resolveAgentBySessionId: () => undefined,
+      resolveAgentByParticipantId: () => undefined,
+    }))
+
+    deliverer.deliver(makeNotification({ dispatcherSessionId: 's1', dispatcherParticipantId: 'p1' }))
+
+    // 三层路由全部落空:push 抛错 → deliverer 入队,由 get_notifications 补读。
+    await vi.waitFor(() => expect(notificationQueue.size).toBe(1))
+    expect(notificationQueue.drain()[0]).toMatchObject({ dispatcherSessionId: 's1', dispatcherParticipantId: 'p1' })
+  })
+
+  it('deliverer does not enqueue when a dispatcher-session push succeeds', async () => {
+    const dispatcher = agentStub('agent-dispatcher')
+    const deliverer = createNotificationDeliverer(new DshAgentPushAdapter({
+      resolveAgent: () => undefined,
+      resolveAgentBySessionId: sessionId => (sessionId === 'session-x' ? asAgent(dispatcher) : undefined),
+    }))
+
+    deliverer.deliver(makeNotification({ dispatcherSessionId: 'session-x' }))
+
+    expect(dispatcher.followup).toHaveBeenCalledTimes(1)
+    expect(notificationQueue.size).toBe(0)
+  })
+
+  it('treats an empty dispatcherSessionId as absent (group-level routing applies)', async () => {
+    const root = agentStub('agent-root')
+    const resolveBySession = vi.fn()
+    const adapter = new DshAgentPushAdapter({
+      resolveAgent: () => asAgent(root),
+      resolveAgentBySessionId: resolveBySession,
+    })
+
+    await adapter.push(makeNotification({ dispatcherSessionId: '  ' }))
+
+    // 空白 dispatcherSessionId 视为无:不进入定向路由,走群级路径推送。
+    expect(resolveBySession).not.toHaveBeenCalled()
+    expect(root.followup).toHaveBeenCalledTimes(1)
+    expect(notificationQueue.size).toBe(0)
+  })
 })
 
 describe('NullPushAdapter', () => {

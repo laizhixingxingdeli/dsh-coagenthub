@@ -58,6 +58,16 @@ function executorNameFromFrame(frame: WsEventFrame, nameById: Map<string, string
 }
 
 /**
+ * 归一化 dispatcher 路由字段:null/undefined/空串都视为无(服务端字段可能尚不
+ * 存在,一律容错)。frame 与 task 载荷同用。
+ */
+function dispatcherField(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}
+
+/**
  * One background monitor per plugin instance. `start()` wires the WS frame
  * handler, connects the socket, and begins the fallback poller; `stop()` tears
  * both down. Frames and polls are also exposed as public methods so unit tests
@@ -116,6 +126,9 @@ export class TaskWatcher {
     // 无群归属的帧无法定位,直接忽略。
     if (groupId === undefined || groupId.trim() === '') return
     const time = new Date().toISOString()
+    // dispatcher 路由字段:服务端回显后用于定向推送,缺失时走群级兜底。
+    const dispatcherSessionId = dispatcherField(frame.dispatcherSessionId)
+    const dispatcherParticipantId = dispatcherField(frame.dispatcherParticipantId)
     switch (frame.type) {
       case 'group_message': {
         // 群消息不属于需要 agent 处理的终态事件,不再投递 message.received。
@@ -130,6 +143,8 @@ export class TaskWatcher {
           status: 'stalled',
           executorName: executorNameFromFrame(frame, this.nameById),
           summary: summarize(typeof frame.summary === 'string' ? frame.summary : undefined),
+          dispatcherSessionId,
+          dispatcherParticipantId,
           time,
         })
         return
@@ -149,6 +164,8 @@ export class TaskWatcher {
           status,
           executorName: executorNameFromFrame(frame, this.nameById),
           summary: summarize(typeof frame.summary === 'string' ? frame.summary : undefined),
+          dispatcherSessionId,
+          dispatcherParticipantId,
           time,
         })
         return
@@ -199,6 +216,9 @@ export class TaskWatcher {
           status: task.status,
           executorName: this.nameById.get(task.executorParticipantId),
           summary: summarize(summary),
+          // 服务端回显的 dispatcher 路由字段:容错读取,缺失时走群级兜底。
+          dispatcherSessionId: dispatcherField(task.dispatcherSessionId),
+          dispatcherParticipantId: dispatcherField(task.dispatcherParticipantId),
           time,
         })
       }

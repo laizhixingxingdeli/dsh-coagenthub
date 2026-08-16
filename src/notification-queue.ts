@@ -26,6 +26,13 @@ export interface CoAgentHubNotification {
   executorName?: string
   /** 汇报摘要:diffSummary.summary / brief tail,截断。 */
   summary?: string
+  /**
+   * 下发者会话 id(dispatch 时经 metadata 传入、服务端回显;命中时按会话定向
+   * 推送,不再走群级过滤)。
+   */
+  dispatcherSessionId?: string
+  /** 下发者 participant id(dispatcherSessionId 缺失/找不到时的兜底路由键)。 */
+  dispatcherParticipantId?: string
   /** ISO 8601 timestamp of the event. */
   time: string
 }

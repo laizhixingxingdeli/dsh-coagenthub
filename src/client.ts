@@ -88,6 +88,11 @@ export interface PostMessageInput {
   body: string
   audience?: MessageAudience
   audienceRef?: string
+  /**
+   * 结构化透传元数据(如 `{ dispatcherSessionId }`),随消息写入服务端;
+   * 服务端暂不支持时该字段会被忽略,不影响现有调用。
+   */
+  metadata?: Record<string, unknown>
 }
 
 export interface TaskDiffSummary {
@@ -123,6 +128,13 @@ export interface Task {
   /** Process output tail; server may also return it at the task top level. */
   outputTail?: string | null
   attempts?: TaskAttempt[]
+  /**
+   * 下发者会话 id(dispatch 时经 message metadata 传入,服务端回显到任务上;
+   * 服务端尚未支持时缺失)。
+   */
+  dispatcherSessionId?: string | null
+  /** 下发者 participant id(服务端回显;dispatcherSessionId 缺失时的兜底路由)。 */
+  dispatcherParticipantId?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -240,6 +252,7 @@ export class CoAgentHubClient {
   }
 
   postMessage(groupId: string, input: PostMessageInput): Promise<Message> {
+    // metadata 未传时 JSON.stringify 自然省略该键,服务端旧版本不受影响。
     return this.request<Message>(`/groups/${encodeURIComponent(groupId)}/messages`, {
       method: 'POST',
       body: JSON.stringify(input),

@@ -1217,6 +1217,68 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(JSON.parse(String(init.body)).body).toBe('原样任务书')
   })
 
+  it('dispatch_task passes dispatcherSessionId metadata from the exec session id', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    // exec 携带 agent.session.id:经 metadata 透传 dispatcherSessionId(下发者必收)。
+    const result = await executeWithSession(tool, { groupId: 'g1', body: '任务' }, 'session-abc')
+    expect(result).toEqual({ messageId: 'm1', executorParticipantId: 'e-atom', executorName: 'AtomCode 执行器' })
+
+    const [, init] = postMessage.mock.calls[0] as [string, RequestInit]
+    const sent = JSON.parse(String(init.body)) as {
+      body: string
+      audience: string
+      audienceRef: string
+      metadata?: { dispatcherSessionId?: string }
+    }
+    expect(sent).toMatchObject({
+      body: '任务',
+      audience: 'participant',
+      audienceRef: 'e-atom',
+      metadata: { dispatcherSessionId: 'session-abc' },
+    })
+    // 任务书 body 保持干净:不附加任何内部标识。
+    expect(sent.body.includes('dispatcherSessionId')).toBe(false)
+    expect(sent.body.includes('session-abc')).toBe(false)
+  })
+
+  it('dispatch_task omits metadata when the exec carries no session id', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    // exec 无 agent.session.id(web 桥接 / SDK 直调):不传 metadata,保持兼容。
+    await execute(tool, { groupId: 'g1', body: '任务' })
+    const [, init] = postMessage.mock.calls[0] as [string, RequestInit]
+    const sent = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect(sent.metadata).toBeUndefined()
+    expect(sent).not.toHaveProperty('metadata')
+  })
+
+  it('dispatch_task does not send metadata in planOnly preview mode', async () => {
+    const postMessage = vi.fn()
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = await executeWithSession(tool, { groupId: 'g1', body: '预览', planOnly: true }, 'session-abc')
+    expect(postMessage).not.toHaveBeenCalled()
+    expect(result).toEqual({ planned: true, taskBook: '预览' })
+  })
+
   it('dispatch_task with planOnly renders the task book preview without posting a message', async () => {
     const postMessage = vi.fn()
     const client = clientWith((url: string | URL | Request, init?: RequestInit) => {

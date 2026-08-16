@@ -617,11 +617,16 @@ export function createCoAgentHubTools(
         // 群列表中)、当前工作区 cwd 反查自动回填。
         const groupId = await resolveGroupId(args, exec, client, settingsStore, resolveLiveAgentCwd, resolveLiveAgentSessionId)
         const executor = await resolveExecutor(client, args.executorName)
+        // 下发者必收:把当前会话 sessionId 经结构化 metadata 传给服务端
+        // (agent.session.id;读不到就不传,保持兼容)。服务端暂不支持该字段时
+        // 会被忽略,不影响现有消息;任务书 body 保持干净,不附加内部标识。
+        const sessionId = sessionIdFromExec(exec)
         try {
           const message = await client.postMessage(groupId, {
             body: taskBook,
             audience: 'participant',
             audienceRef: executor.id,
+            ...(sessionId !== null ? { metadata: { dispatcherSessionId: sessionId } } : {}),
           })
           return {
             messageId: message.id,

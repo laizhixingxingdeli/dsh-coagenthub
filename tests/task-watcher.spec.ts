@@ -175,6 +175,40 @@ describe('TaskWatcher.handleFrame', () => {
     watcher.handleFrame({ type: 'task_output', groupId: 'g1', taskId: 't1', status: 'queued', output: '排队中…' })
     expect(delivered).toHaveLength(0)
   })
+
+  it('passes dispatcherSessionId/dispatcherParticipantId from terminal frames into the notification', () => {
+    const { watcher, delivered } = makeWatcher()
+    watcher.handleFrame({
+      type: 'task_status_changed',
+      groupId: 'g1',
+      taskId: 't1',
+      status: 'done',
+      dispatcherSessionId: 'session-x',
+      dispatcherParticipantId: 'p1',
+    })
+    watcher.handleFrame({
+      type: 'task_stall_alert',
+      groupId: 'g1',
+      taskId: 't2',
+      dispatcherSessionId: 'session-y',
+      dispatcherParticipantId: 'p2',
+    })
+    expect(delivered).toHaveLength(2)
+    expect(delivered[0]).toMatchObject({ type: 'task.completed', dispatcherSessionId: 'session-x', dispatcherParticipantId: 'p1' })
+    expect(delivered[1]).toMatchObject({ type: 'task.stalled', dispatcherSessionId: 'session-y', dispatcherParticipantId: 'p2' })
+  })
+
+  it('tolerates missing/null/empty dispatcher fields on frames (treated as absent)', () => {
+    const { watcher, delivered } = makeWatcher()
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'done' })
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't2', status: 'done', dispatcherSessionId: null })
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'done', dispatcherSessionId: '  ' })
+    expect(delivered).toHaveLength(3)
+    for (const notification of delivered) {
+      expect(notification.dispatcherSessionId).toBeUndefined()
+      expect(notification.dispatcherParticipantId).toBeUndefined()
+    }
+  })
 })
 
 describe('TaskWatcher.pollOnce', () => {
@@ -327,6 +361,65 @@ describe('TaskWatcher.pollOnce', () => {
     await watcher.pollOnce() // running→stalled:终态,通知
     expect(delivered).toHaveLength(1)
     expect(delivered[0]).toMatchObject({ type: 'task.stalled', groupId: 'g1', taskId: 't1', status: 'stalled' })
+  })
+
+  it('passes dispatcher fields from polled tasks into the notification', async () => {
+    const tasks: Array<Record<string, unknown>> = [
+      {
+        id: 't1',
+        groupId: 'g1',
+        status: 'running',
+        executorParticipantId: 'e1',
+        brief: 'b',
+        diffSummary: null,
+        dispatcherSessionId: 'session-x',
+        dispatcherParticipantId: 'p1',
+        createdAt: 'c',
+        updatedAt: 'u',
+      },
+    ]
+    const client = clientStub({ tasks, participants: [{ id: 'e1', name: 'AtomCode 执行器' }] })
+    const { watcher, delivered } = makeWatcher({ client })
+
+    await watcher.pollOnce() // 基线
+    tasks[0] = { ...tasks[0]!, status: 'done', diffSummary: { summary: '完成', hash: 'h', error: null } }
+    await watcher.pollOnce()
+
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({
+      type: 'task.completed',
+      groupId: 'g1',
+      taskId: 't1',
+      dispatcherSessionId: 'session-x',
+      dispatcherParticipantId: 'p1',
+    })
+  })
+
+  it('tolerates missing/null dispatcher fields on polled tasks (treated as absent)', async () => {
+    const tasks: Array<Record<string, unknown>> = [
+      {
+        id: 't1',
+        groupId: 'g1',
+        status: 'queued',
+        executorParticipantId: 'e1',
+        brief: 'b',
+        diffSummary: null,
+        dispatcherSessionId: null,
+        dispatcherParticipantId: undefined,
+        createdAt: 'c',
+        updatedAt: 'u',
+      },
+    ]
+    const client = clientStub({ tasks, participants: [{ id: 'e1', name: 'AtomCode 执行器' }] })
+    const { watcher, delivered } = makeWatcher({ client })
+
+    await watcher.pollOnce() // 基线
+    tasks[0] = { ...tasks[0]!, status: 'done', diffSummary: { summary: 's', hash: 'h', error: null } }
+    await watcher.pollOnce()
+
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]!.dispatcherSessionId).toBeUndefined()
+    expect(delivered[0]!.dispatcherParticipantId).toBeUndefined()
   })
 })
 

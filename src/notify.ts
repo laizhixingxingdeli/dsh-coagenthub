@@ -79,30 +79,89 @@ export interface DshAgentPushAdapterOptions {
    * `coagenthub_get_notifications` 按 cwd 拉取,不丢失、不串群。
    */
   resolveSessionGroupId?: () => string | null | undefined | Promise<string | null | undefined>
+  /**
+   * 按会话 id 定向解析 live agent(dispatcherSessionId 路由,优先级最高)。
+   * 命中时通知直接 followup 到该会话,不再走群级过滤(下发会话即权威目标);
+   * 未配置或返回 undefined 时继续回退到 participant+group、群级兜底。
+   */
+  resolveAgentBySessionId?: (sessionId: string) => Agent | undefined
+  /**
+   * 按 下发者 participant id + 通知群 id 解析 live agent(dispatcherParticipantId
+   * 兜底路由)。返回该 participant 下归属群等于通知群的那个会话;返回
+   * undefined(身份不属于本实例 / 无匹配会话)时继续回退到群级兜底。解析抛错
+   * 视为找不到,通知最终入队由 get_notifications 补读,不丢通知。
+   */
+  resolveAgentByParticipantId?: (
+    participantId: string,
+    groupId: string,
+  ) => Agent | undefined | Promise<Agent | undefined>
   /** 可选日志回调(推送成功 / 回退说明)。 */
   log?: (message: string) => void
 }
 
+/** 判断通知上的 dispatcher 路由字段是否可用(非空字符串)。 */
+function isUsableDispatcherField(value: string | undefined): value is string {
+  return value !== undefined && value.trim() !== ''
+}
+
 /**
  * 基于 dsh `Agent.followup(UserMessage)` 的主动推送适配器。通知被包装成
- * plugin 来源的用户消息,排队为当前 agent 的 next-turn 消息并唤醒 driver;
- * 解析不到 agent 时抛出,由 deliverer 回退队列。配置了
- * `resolveSessionGroupId` 时,推送前按会话 cwd 过滤:只把当前会话对应群的
- * 通知推入本会话,其他群的通知入队隔离(0.0.16 后 TaskWatcher 收集所有群
- * 通知,推送侧必须按会话过滤,否则其他群通知被注入当前会话上下文)。
+ * plugin 来源的用户消息,排队为指定 agent 的 next-turn 消息并唤醒 driver。
+ * 路由优先级(下发者必收):① dispatcherSessionId 定向到对应 live 会话 →
+ * ② dispatcherParticipantId + groupId 兜底 → ③ 现有群级过滤(当前会话 cwd
+ * 反查群,相等才推送) → 全部找不到时抛出,由 deliverer 回落队列。任何一层
+ * 推送成功都不入队;失败/找不到才入队,避免重复。
  */
 export class DshAgentPushAdapter implements PushAdapter {
   private readonly resolveAgent: () => Agent | undefined
   private readonly resolveSessionGroupId?: () => string | null | undefined | Promise<string | null | undefined>
+  private readonly resolveAgentBySessionId?: (sessionId: string) => Agent | undefined
+  private readonly resolveAgentByParticipantId?: (
+    participantId: string,
+    groupId: string,
+  ) => Agent | undefined | Promise<Agent | undefined>
   private readonly log?: (message: string) => void
 
   constructor(options: DshAgentPushAdapterOptions) {
     this.resolveAgent = options.resolveAgent
     this.resolveSessionGroupId = options.resolveSessionGroupId
+    this.resolveAgentBySessionId = options.resolveAgentBySessionId
+    this.resolveAgentByParticipantId = options.resolveAgentByParticipantId
     this.log = options.log
   }
 
+  /** followup 推送 + 日志;抛错由 deliverer 捕获并入队,不丢通知。 */
+  private followup(agent: Agent, notification: CoAgentHubNotification): void {
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: formatNotification(notification) }],
+      source: { kind: 'plugin', plugin: NOTIFICATION_PLUGIN_NAME },
+    }))
+    this.log?.(`[coagenthub] 主动推送(唤醒) → ${agent.id}: ${formatNotification(notification)}`)
+  }
+
   async push(notification: CoAgentHubNotification): Promise<void> {
+    // ① dispatcherSessionId 定向:命中即推送到该会话,不走群级过滤。
+    if (isUsableDispatcherField(notification.dispatcherSessionId) && this.resolveAgentBySessionId !== undefined) {
+      const agent = this.resolveAgentBySessionId(notification.dispatcherSessionId)
+      if (agent !== undefined) {
+        this.followup(agent, notification)
+        return
+      }
+    }
+    // ② dispatcherParticipantId + groupId 兜底:找到下发者身份下归属该群的会话。
+    if (isUsableDispatcherField(notification.dispatcherParticipantId) && this.resolveAgentByParticipantId !== undefined) {
+      let agent: Agent | undefined
+      try {
+        agent = await this.resolveAgentByParticipantId(notification.dispatcherParticipantId, notification.groupId)
+      } catch {
+        agent = undefined // 解析失败视为找不到,继续回退/入队。
+      }
+      if (agent !== undefined) {
+        this.followup(agent, notification)
+        return
+      }
+    }
+    // ③ 群级 fallback:当前会话 cwd 反查群过滤(保留既有行为)。
     const agent = this.resolveAgent()
     if (agent === undefined) {
       throw new Error('no live dsh agent to followup')
@@ -124,11 +183,7 @@ export class DshAgentPushAdapter implements PushAdapter {
         return
       }
     }
-    agent.followup(createUserMessage({
-      content: [{ type: 'text', text: formatNotification(notification) }],
-      source: { kind: 'plugin', plugin: NOTIFICATION_PLUGIN_NAME },
-    }))
-    this.log?.(`[coagenthub] 主动推送(唤醒) → ${agent.id}: ${formatNotification(notification)}`)
+    this.followup(agent, notification)
   }
 }
 

@@ -132,7 +132,7 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   })
   // 晚绑定的 agents 注册表:inject 接线后赋值,供工具层 live-agent cwd 回退
   // 解析器与通知推送共用;agents 服务下线时清空,回退到无 live agent 状态。
-  let agentsRegistry: { roots(): Agent[] } | undefined
+  let agentsRegistry: { roots(): Agent[]; list(): Agent[] } | undefined
   // 通知 deliverer 起步为队列回退;agents 服务可用后动态切到主动推送。
   const deliverer = createNotificationDeliverer(nullAdapter())
   // 会话→群反查缓存(推送隔离用),按插件实例隔离。TTL 后既不读也不保留:
@@ -140,6 +140,69 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   const sessionGroupCache = new Map<string, SessionGroupCacheEntry>()
   /** 同一 key 的 in-flight 反查 promise 去重:突发通知只打一次 listGroups。 */
   const sessionGroupInflight = new Map<string, Promise<string | null>>()
+
+  /**
+   * 单个 live agent 的会话→群反查(推送隔离用)。解析顺序与拉取侧一致:
+   * 会话 per-session 映射(非空且存在于群列表)优先 → 会话 cwd 反查
+   * (agent.session.header.cwd,旧结构回退 meta.cwd)。结果按
+   * agent 会话 + 该会话 per-session 映射 + settings 缓存(TTL 内复用),避免
+   * 每条通知都打一次 listGroups HTTP(接口慢/挂时最坏卡 10s,通知悬在"既未
+   * 入队也未推送"状态);反查失败也缓存为 null,通知立即入队由
+   * coagenthub_get_notifications 补读,网络恢复后 TTL 过期自动重查。
+   */
+  const resolveSessionGroupIdForAgent = (agent: Agent | undefined): Promise<string | null> => {
+    const settings = settingsStore?.get()
+    const session = agent?.session as { id?: string; header?: { cwd?: string }; meta?: { cwd?: string } } | undefined
+    const sessionId = session?.id
+    const cwd = session?.header?.cwd ?? session?.meta?.cwd
+    const cacheKey = [
+      agent?.id ?? '',
+      sessionId ?? '',
+      settings?.sessionActiveGroups?.[sessionId ?? ''] ?? '',
+      settings?.activeGroupId ?? '',
+      settings?.mappingRule?.macPrefix ?? '',
+      settings?.mappingRule?.winPrefix ?? '',
+    ].join('|')
+    const cached = sessionGroupCache.get(cacheKey)
+    if (cached !== undefined && Date.now() - cached.at < SESSION_GROUP_CACHE_TTL_MS) {
+      return Promise.resolve(cached.groupId)
+    }
+    // 同一 key 的并发推送共享一次反查:突发终态通知不产生 N 个并发 listGroups。
+    const inflight = sessionGroupInflight.get(cacheKey)
+    if (inflight !== undefined) return inflight
+    const pending = (async (): Promise<string | null> => {
+      if (agent === undefined) return null
+      try {
+        const groups = await withTimeout(client.listGroups(100), SESSION_GROUP_RESOLVE_TIMEOUT_MS)
+        return resolveGroupIdForCwd(cwd, groups.items, settings, sessionId)
+      } catch {
+        return null // 反查失败/超时:本轮全部入队,由 get_notifications 补读。
+      }
+    })().then((groupId) => {
+      // 填充新条目时顺带驱逐过期条目,避免会话/设置变化产生的 key 无限累积。
+      const now = Date.now()
+      for (const [key, entry] of sessionGroupCache) {
+        if (now - entry.at >= SESSION_GROUP_CACHE_TTL_MS) sessionGroupCache.delete(key)
+      }
+      sessionGroupCache.set(cacheKey, { groupId, at: now })
+      return groupId
+    })
+    sessionGroupInflight.set(cacheKey, pending)
+    pending.then(
+      () => sessionGroupInflight.delete(cacheKey),
+      () => sessionGroupInflight.delete(cacheKey),
+    )
+    return pending
+  }
+
+  /** 按会话 id 定向解析 live agent(dispatcherSessionId 路由):注册表全量查找。 */
+  const resolveLiveAgentBySessionId = (sessionId: string): Agent | undefined => {
+    try {
+      return agentsRegistry?.list().find(agent => agent?.session?.id === sessionId)
+    } catch {
+      return undefined // 注册表不可用/下线:视为找不到,通知回退入队。
+    }
+  }
 
   // 动态注入 agents 服务:插件静态 inject 仅声明 ['tools'](避免没有该服务的
   // profile 启动失败),而 cordis 4 对未注入属性访问会抛 "cannot get property
@@ -154,7 +217,7 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   // ctx.inject 创建的注入 fiber 会自注册为插件 fiber 的子 effect(cordis Fiber
   // 构造时 parent.fiber.effect),插件卸载时级联卸载,无需额外清理。
   void ctx.inject(['agents'], (agentsCtx) => {
-    const registry = (agentsCtx as Context & { agents: { roots(): Agent[] } }).agents
+    const registry = (agentsCtx as Context & { agents: { roots(): Agent[]; list(): Agent[] } }).agents
     agentsRegistry = registry
     ctx.logger?.('coagenthub').info('dsh 运行时支持主动唤醒(agent.followup),通知将直接推送进会话并唤醒 driver')
     deliverer.setPushAdapter(new DshAgentPushAdapter({
@@ -165,54 +228,28 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
       // 时的绝对工作目录,旧结构回退 meta.cwd。只把该群的通知 followup 推入
       // 本会话,其他群的通知由适配器入队隔离,避免 0.0.16 后 TaskWatcher 收集
       // 到的其他群通知被注入当前会话。
-      // 会话→群反查结果按 agent 会话 + 该会话 per-session 映射 + settings 缓存
-      // (TTL 内复用),避免每条通知都打一次 listGroups HTTP(接口慢/挂时最坏卡
-      // 10s,通知悬在"既未入队也未推送"状态);反查失败也缓存为 null,通知立即
-      // 入队由 coagenthub_get_notifications 补读,网络恢复后 TTL 过期自动重查。
-      resolveSessionGroupId: async () => {
-        const agent = registry.roots()[0]
-        const settings = settingsStore?.get()
-        const session = agent?.session as { id?: string; header?: { cwd?: string }; meta?: { cwd?: string } } | undefined
-        const sessionId = session?.id
-        const cwd = session?.header?.cwd ?? session?.meta?.cwd
-        const cacheKey = [
-          agent?.id ?? '',
-          sessionId ?? '',
-          settings?.sessionActiveGroups?.[sessionId ?? ''] ?? '',
-          settings?.activeGroupId ?? '',
-          settings?.mappingRule?.macPrefix ?? '',
-          settings?.mappingRule?.winPrefix ?? '',
-        ].join('|')
-        const cached = sessionGroupCache.get(cacheKey)
-        if (cached !== undefined && Date.now() - cached.at < SESSION_GROUP_CACHE_TTL_MS) {
-          return cached.groupId
+      resolveSessionGroupId: () => resolveSessionGroupIdForAgent(registry.roots()[0]),
+      // 下发者必收:任务终态带 dispatcherSessionId 时,按会话 id 定向找到
+      // 对应的 live agent 并 followup(注册表全量查找,不限于 root agent);
+      // 找不到时适配器回退到 participant+group、再回退群级隔离,全部落空入队。
+      resolveAgentBySessionId: resolveLiveAgentBySessionId,
+      // dispatcherParticipantId 兜底路由:只有本 dsh 实例身份与下发者 participant
+      // 一致时通知才属于本实例的会话(执行器/其他参与者的任务由各自的插件实例
+      // 处理);身份一致后遍历 live agents,返回会话归属群(per-session 映射 /
+      // cwd 反查)等于通知群的那个会话,避免把通知推给同群但不同身份的会话。
+      resolveAgentByParticipantId: async (participantId, groupId) => {
+        let selfParticipantId: string | undefined
+        try {
+          selfParticipantId = client.participantId
+        } catch {
+          return undefined // 身份解析失败:视为不属于本实例,回退入队。
         }
-        // 同一 key 的并发推送共享一次反查:突发终态通知不产生 N 个并发 listGroups。
-        const inflight = sessionGroupInflight.get(cacheKey)
-        if (inflight !== undefined) return inflight
-        const pending = (async (): Promise<string | null> => {
-          if (agent === undefined) return null
-          try {
-            const groups = await withTimeout(client.listGroups(100), SESSION_GROUP_RESOLVE_TIMEOUT_MS)
-            return resolveGroupIdForCwd(cwd, groups.items, settings, sessionId)
-          } catch {
-            return null // 反查失败/超时:本轮全部入队,由 get_notifications 补读。
-          }
-        })().then((groupId) => {
-          // 填充新条目时顺带驱逐过期条目,避免会话/设置变化产生的 key 无限累积。
-          const now = Date.now()
-          for (const [key, entry] of sessionGroupCache) {
-            if (now - entry.at >= SESSION_GROUP_CACHE_TTL_MS) sessionGroupCache.delete(key)
-          }
-          sessionGroupCache.set(cacheKey, { groupId, at: now })
-          return groupId
-        })
-        sessionGroupInflight.set(cacheKey, pending)
-        pending.then(
-          () => sessionGroupInflight.delete(cacheKey),
-          () => sessionGroupInflight.delete(cacheKey),
-        )
-        return pending
+        if (selfParticipantId !== participantId) return undefined
+        for (const agent of agentsRegistry?.list() ?? []) {
+          const sessionGroupId = await resolveSessionGroupIdForAgent(agent)
+          if (sessionGroupId === groupId) return agent
+        }
+        return undefined
       },
       log,
     }))

@@ -191,6 +191,49 @@ describe('CoAgentHubClient', () => {
     expect(JSON.parse(String(init.body))).toEqual({ brief: '新任务书' })
   })
 
+  it('postMessage passes metadata through to the request body', async () => {
+    const message = {
+      id: 'm1',
+      groupId: 'g1',
+      senderId: 'u1',
+      parentId: null,
+      audience: 'participant',
+      audienceRef: 'e1',
+      body: 'b',
+      contentType: 'text',
+      createdAt: 'c',
+      updatedAt: 'u',
+    }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(message))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    const result = await client.postMessage('g1', {
+      body: 'b',
+      metadata: { dispatcherSessionId: 'session-abc' },
+    })
+
+    expect(result).toEqual(message)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toBe(`${DEFAULT_API_BASE}/groups/g1/messages`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      body: 'b',
+      metadata: { dispatcherSessionId: 'session-abc' },
+    })
+  })
+
+  it('postMessage omits metadata when not provided (server remains compatible)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'm1' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new CoAgentHubClient()
+    await client.postMessage('g1', { body: 'b' })
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ body: 'b' })
+  })
+
   it('updateGroup PATCHes title/projectPath to the group endpoint and returns the group', async () => {
     const group = {
       id: 'g1',
