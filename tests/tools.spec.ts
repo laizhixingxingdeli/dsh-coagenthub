@@ -20,6 +20,7 @@ const EXPECTED_TOOL_NAMES = [
   'coagenthub_get_workspace_instructions',
   'coagenthub_list_groups',
   'coagenthub_get_group',
+  'coagenthub_get_group_members',
   'coagenthub_list_executors',
   'coagenthub_get_task',
   'coagenthub_update_task',
@@ -368,6 +369,83 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
       members: [],
     })
     expect(Object.values(result).some(value => value === undefined)).toBe(false)
+  })
+
+  it('get_group_members returns members with roles and prompt', async () => {
+    const members = [
+      {
+        participantId: 'e-atom',
+        name: 'AtomCode 执行器',
+        device: 'mac',
+        roles: ['executor'],
+        prompt: '主要执行者',
+        joinedAt: '2026-08-15T06:00:00.000Z',
+      },
+      {
+        participantId: 'u1',
+        name: 'Local User',
+        device: null,
+        roles: ['coordinator'],
+        prompt: '任务发布者',
+        joinedAt: '2026-08-15T06:00:00.000Z',
+      },
+    ]
+    const client = clientWith(() => Promise.resolve(members))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group_members')!
+    const result = (await execute(tool, { groupId: 'g1' })) as Array<Record<string, unknown>>
+    expect(result).toEqual(members)
+    const url = String((fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0])
+    expect(url).toContain('/groups/g1/members')
+    // 返回对象不得携带值为 undefined 的字段(序列化安全)。
+    expect(JSON.stringify(result).includes('undefined')).toBe(false)
+  })
+
+  it('get_group_members normalizes missing device/prompt/joinedAt and wraps string roles', async () => {
+    const client = clientWith(() =>
+      Promise.resolve([
+        { participantId: 'e1', name: 'N1', roles: ['executor'] },
+        { participantId: 'e2', name: 'N2', device: 'win', roles: 'executor' },
+      ]),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group_members')!
+    const result = (await execute(tool, { groupId: 'g1' })) as Array<Record<string, unknown>>
+    expect(result).toEqual([
+      { participantId: 'e1', name: 'N1', device: null, roles: ['executor'], prompt: null, joinedAt: null },
+      // 单个字符串角色被包装为数组,避免丢失分工信息。
+      { participantId: 'e2', name: 'N2', device: 'win', roles: ['executor'], prompt: null, joinedAt: null },
+    ])
+    expect(JSON.stringify(result).includes('undefined')).toBe(false)
+  })
+
+  it('get_group_members rejects a missing groupId with a clear error', async () => {
+    const client = clientWith(() => Promise.resolve([]))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group_members')!
+    // schema 层必填校验:缺参时报清晰错误而非崩溃。
+    await expect(execute(tool, {})).rejects.toThrow('missing required property "groupId"')
+    // 空字符串兜底:requireGroupId 拒绝空白 groupId。
+    await expect(execute(tool, { groupId: '  ' })).rejects.toThrow('groupId is required')
+  })
+
+  it('get_group_members surfaces a clear error when the group does not exist (404)', async () => {
+    const client = clientWith(() =>
+      Promise.resolve(new Response('{"error":"group not found"}', { status: 404 })),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group_members')!
+    await expect(execute(tool, { groupId: 'missing' })).rejects.toThrow('群组不存在')
+  })
+
+  it('get_group_members surfaces a clear error with status and reason on non-2xx', async () => {
+    const client = clientWith(() =>
+      Promise.resolve(new Response('{"error":"internal failure"}', { status: 500 })),
+    )
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group_members')!
+    await expect(execute(tool, { groupId: 'g1' })).rejects.toThrow('CoAgentHub API 错误(500): internal failure')
+  })
+
+  it('get_group_members surfaces a clear error when the API is unreachable', async () => {
+    const client = clientWith(() => Promise.reject(new TypeError('fetch failed')))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_get_group_members')!
+    await expect(execute(tool, { groupId: 'g1' })).rejects.toThrow('无法连接 CoAgentHub 服务')
   })
 
   it('list_executors maps executors to the view shape', async () => {

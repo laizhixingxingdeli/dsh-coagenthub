@@ -51,6 +51,19 @@ export interface GroupMember {
   device?: string | null
 }
 
+/**
+ * One member as returned by `GET /groups/:id/members` (the dedicated members
+ * endpoint): carries the participant identity plus role/prompt 分工信息.
+ */
+export interface GroupMemberInfo {
+  participantId: string
+  name: string
+  device: string | null
+  roles: string[]
+  prompt: string | null
+  joinedAt: string | null
+}
+
 export interface GroupList {
   items: Group[]
   total: number
@@ -243,6 +256,11 @@ export class CoAgentHubClient {
   /** Fetch one group by id (GET /groups/:id); may include `members`. */
   getGroup(groupId: string): Promise<Group> {
     return this.request<Group>(`/groups/${encodeURIComponent(groupId)}`)
+  }
+
+  /** List members of one group with role/prompt 分工信息 (GET /groups/:id/members). */
+  getGroupMembers(groupId: string): Promise<GroupMemberInfo[]> {
+    return this.request<GroupMemberInfo[]>(`/groups/${encodeURIComponent(groupId)}/members`)
   }
 
   /** List registered executors (GET /executors). */

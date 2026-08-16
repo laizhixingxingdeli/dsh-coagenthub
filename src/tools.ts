@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { CoAgentHubClient, CoAgentHubError } from './client.ts'
+import { CoAgentHubClient, CoAgentHubError, CoAgentHubFetchError } from './client.ts'
 import type { Message, Participant } from './client.ts'
 import type { CoAgentHubSettingsStore } from './config.ts'
 import { notificationQueue } from './notification-queue.ts'
@@ -88,6 +88,17 @@ function requireGroupId(groupId: string | undefined): string {
     throw new Error('groupId is required: pass the group id to scope the query')
   }
   return groupId
+}
+
+/**
+ * Normalize a member's `roles` to a string array: arrays pass through, a
+ * single string is wrapped (server may send one role as a string), anything
+ * else (missing/null) becomes an empty array — never `undefined`.
+ */
+function normalizeMemberRoles(roles: string[] | string | null | undefined): string[] {
+  if (Array.isArray(roles)) return roles
+  if (typeof roles === 'string') return [roles]
+  return []
 }
 
 /** Resolve the executor participant whose name contains `executorName`. */
@@ -185,6 +196,19 @@ const GROUP_DETAIL_VIEW_SCHEMA = {
         },
       },
     },
+  },
+} as const
+
+const GROUP_MEMBER_VIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    participantId: { type: 'string', required: true },
+    name: { type: 'string', required: true },
+    device: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+    roles: { type: 'array', items: { type: 'string' }, required: true },
+    prompt: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+    joinedAt: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
   },
 } as const
 
@@ -597,6 +621,49 @@ export function createCoAgentHubTools(
             name: member.name,
             device: member.device ?? null,
           })),
+        }
+      },
+    }),
+
+    defineTool({
+      name: 'coagenthub_get_group_members',
+      description:
+        'List members of a CoAgentHub group with their roles and 分工 prompt (participantId, name, device, roles, prompt, joinedAt). Useful to read who is in a group and what each member is assigned to do.',
+      parameters: {
+        groupId: { type: 'string', required: true, description: 'Target group id.' },
+      },
+      output: { schema: { type: 'array', items: GROUP_MEMBER_VIEW_SCHEMA } as const, render: renderValue },
+      async execute(args: { groupId?: string }) {
+        const groupId = requireGroupId(args.groupId)
+        try {
+          const members = await client.getGroupMembers(groupId)
+          // 归一化:缺失的 device/prompt/joinedAt 补 null、roles 兜底为数组,
+          // 避免返回对象携带 undefined 字段触发 lossless JSON 校验失败。
+          return members.map(member => ({
+            participantId: member.participantId,
+            name: member.name,
+            device: member.device ?? null,
+            roles: normalizeMemberRoles(member.roles),
+            prompt: member.prompt ?? null,
+            joinedAt: member.joinedAt ?? null,
+          }))
+        } catch (error) {
+          if (error instanceof CoAgentHubError) {
+            if (error.status === 404) {
+              // 404 可能表示群不存在,也可能表示服务端未实现该成员接口,两者都给出清晰提示。
+              throw new Error('群组不存在或成员接口不可用(404)')
+            }
+            const reason = serverErrorMessage(error)
+            throw new Error(
+              reason === ''
+                ? `CoAgentHub API 错误(${error.status})`
+                : `CoAgentHub API 错误(${error.status}): ${reason}`,
+            )
+          }
+          if (error instanceof CoAgentHubFetchError) {
+            throw new Error(`无法连接 CoAgentHub 服务: ${error.message}`)
+          }
+          throw error
         }
       },
     }),

@@ -68,6 +68,7 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
 | `coagenthub_create_group` | `title` | 建群,返回 id/title/status |
 | `coagenthub_list_groups` | `limit?`(默认 100)、`status?`(`active`/`archived`) | 群列表(id/title/status/projectPath) |
 | `coagenthub_get_group` | `groupId` | 单个群(id/title/status/projectPath/members) |
+| `coagenthub_get_group_members` | `groupId` | 群成员分工信息(participantId/name/device/roles/prompt/joinedAt) |
 | `coagenthub_post_message` | `groupId`、`body`、`audience?`(默认 broadcast)、`audienceRef?` | 群消息 |
 | `coagenthub_dispatch_task` | `groupId`、`body`、`executorName?`(默认 AtomCode)、`goal?/scope?/acceptance?/tests?/report?/priority?/dependencies?` | 找名字含 executorName 的参与者,发定向消息触发任务;结构化字段渲染成 Markdown 任务书(只传 body 时原样发送);返回消息 id |
 | `coagenthub_list_tasks` | `groupId` | 任务列表(id/status/executor/summary/时间) |
