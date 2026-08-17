@@ -12,7 +12,7 @@ import { CoAgentHubClient, CoAgentHubError, CoAgentHubFetchError } from './clien
 import type { Message, Participant } from './client.ts'
 import type { CoAgentHubSettings, CoAgentHubSettingsStore } from './config.ts'
 import { notificationQueue } from './notification-queue.ts'
-import { buildTaskBook } from './task-book.ts'
+import { buildTaskBook, type CommitMode } from './task-book.ts'
 import type { GroupWithPath } from './workspace.ts'
 import { findGroupByWorkspaceCwd, groupProjectWinPath } from './workspace.ts'
 import type { LiveAgentCwdResolver, LiveAgentSessionIdResolver } from './workspace-instructions.ts'
@@ -539,7 +539,7 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_dispatch_task',
       description:
-        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时优先用当前会话已保存的工作区映射(per-session,须在群列表中),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。planOnly=true 时只生成任务书预览(与真实下发渲染完全一致),不发送给执行器、不创建任务;返回 { planned: true, taskBook }。',
+        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时优先用当前会话已保存的工作区映射(per-session,须在群列表中),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。planOnly=true 时只生成任务书预览(与真实下发渲染完全一致),不发送给执行器、不创建任务;返回 { planned: true, taskBook }。commitMode 控制任务书是否追加 "## CommitMode: none" 标记(auto 默认:按任务内容保守自动判断,只读/发布/纯 API/环境操作等不产生代码提交的任务会自动追加;none:强制追加,已含标记或 ## Acceptance: skip-verify 时不重复;default:不追加保持原样)。派发只读/发布/纯 API/环境操作等不产生代码提交的任务时,应传 commitMode="none" 或保证 body 已含 "## CommitMode: none" / "## Acceptance: skip-verify",避免服务端弱验收误判 failed。',
       parameters: {
         groupId: { type: 'string', description: 'Target group id. 可选:不传时自动回填(当前会话 per-session 映射优先 → 当前工作区 cwd 反查兜底)。' },
         body: { type: 'string', required: true, description: 'Task brief sent to the executor (plain text, kept verbatim).' },
@@ -547,6 +547,13 @@ export function createCoAgentHubTools(
           type: 'string',
           default: DEFAULT_EXECUTOR_NAME,
           description: 'Name fragment matching an executor participant, e.g. "AtomCode" or "Reasoning".',
+        },
+        commitMode: {
+          type: 'string',
+          enum: ['auto', 'none', 'default'],
+          default: 'auto',
+          description:
+            '提交模式标记:auto(默认)按任务内容保守自动判断,只读/发布/纯 API/环境操作等不产生代码提交的任务自动追加 "## CommitMode: none";none 强制追加(已含标记或 ## Acceptance: skip-verify 时不重复);default 不追加保持原样。',
         },
         planOnly: {
           type: 'boolean',
@@ -589,6 +596,7 @@ export function createCoAgentHubTools(
         groupId?: string
         body: string
         executorName?: string
+        commitMode?: CommitMode
         planOnly?: boolean
         goal?: string
         scope?: string
@@ -602,6 +610,7 @@ export function createCoAgentHubTools(
         // 调用(不解析群/执行器、不发消息、不创建任务),返回 { planned: true, taskBook }。
         const taskBook = buildTaskBook({
           body: args.body,
+          commitMode: args.commitMode,
           goal: args.goal,
           scope: args.scope,
           acceptance: args.acceptance,

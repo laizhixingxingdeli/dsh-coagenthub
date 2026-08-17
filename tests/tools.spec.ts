@@ -1217,6 +1217,66 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(JSON.parse(String(init.body)).body).toBe('原样任务书')
   })
 
+  describe('dispatch_task commitMode marker', () => {
+    function dispatchClient() {
+      const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+      const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).endsWith('/participants')) {
+          return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+        }
+        return postMessage(url, init)
+      })
+      return { client, postMessage }
+    }
+
+    async function sentBody(body: string, commitMode?: unknown): Promise<string> {
+      const { client, postMessage } = dispatchClient()
+      const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+      await execute(tool, {
+        groupId: 'g1',
+        body,
+        ...(commitMode !== undefined ? { commitMode } : {}),
+      })
+      const [, init] = postMessage.mock.calls[0] as [string, RequestInit]
+      return JSON.parse(String(init.body)).body as string
+    }
+
+    it('auto(default) 对普通开发任务不追加标记', async () => {
+      expect(await sentBody('实现登录页')).toBe('实现登录页')
+    })
+
+    it('auto 命中发布/只读关键词时追加标记', async () => {
+      expect(await sentBody('发布 npm 包到 registry')).toBe('发布 npm 包到 registry\n\n## CommitMode: none')
+      expect(await sentBody('只读任务:查看线上配置')).toBe('只读任务:查看线上配置\n\n## CommitMode: none')
+    })
+
+    it('commitMode=none 追加标记且不重复', async () => {
+      expect(await sentBody('任务', 'none')).toBe('任务\n\n## CommitMode: none')
+      expect(await sentBody('任务\n\n## CommitMode: none', 'none')).toBe('任务\n\n## CommitMode: none')
+    })
+
+    it('commitMode=default 不追加标记(即使命中关键词)', async () => {
+      expect(await sentBody('发布 npm 包', 'default')).toBe('发布 npm 包')
+    })
+
+    it('body 已含标记或 skip-verify 时不重复追加', async () => {
+      expect(await sentBody('任务\n\n## CommitMode: none')).toBe('任务\n\n## CommitMode: none')
+      expect(await sentBody('任务\n\n## Acceptance: skip-verify', 'none')).toBe('任务\n\n## Acceptance: skip-verify')
+    })
+
+    it('pnpm 不误命中 npm 关键词(auto 保守)', async () => {
+      expect(await sentBody('实现功能,要求 pnpm test 通过')).toBe('实现功能,要求 pnpm test 通过')
+    })
+
+    it('description 说明 commitMode 用法与无提交任务指引', () => {
+      const client = dispatchClient().client
+      const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+      expect(tool.description).toContain('commitMode')
+      expect(tool.description).toContain('## CommitMode: none')
+      expect(tool.description).toContain('## Acceptance: skip-verify')
+    })
+  })
+
   it('dispatch_task passes dispatcherSessionId metadata from the exec session id', async () => {
     const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
     const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
