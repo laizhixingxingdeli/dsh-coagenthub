@@ -93,6 +93,10 @@ export interface PostMessageInput {
    * 服务端暂不支持时该字段会被忽略,不影响现有调用。
    */
   metadata?: Record<string, unknown>
+  /** Spec-Driven 派发:规范文档路径(如 specs/feature-x.md),服务端据此在任务书中插入「关联规范」段。 */
+  specRef?: string
+  /** 规范文档的 Git Hash(版本快照),用于审计和版本锁定;可选。 */
+  specHash?: string
 }
 
 export interface TaskDiffSummary {

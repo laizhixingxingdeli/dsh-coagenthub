@@ -539,7 +539,7 @@ export function createCoAgentHubTools(
     defineTool({
       name: 'coagenthub_dispatch_task',
       description:
-        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时优先用当前会话已保存的工作区映射(per-session,须在群列表中),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。planOnly=true 时只生成任务书预览(与真实下发渲染完全一致),不发送给执行器、不创建任务;返回 { planned: true, taskBook }。commitMode 控制任务书是否追加 "## CommitMode: none" 标记(auto 默认:按任务内容保守自动判断,只读/发布/纯 API/环境操作等不产生代码提交的任务会自动追加;none:强制追加,已含标记或 ## Acceptance: skip-verify 时不重复;default:不追加保持原样)。派发只读/发布/纯 API/环境操作等不产生代码提交的任务时,应传 commitMode="none" 或保证 body 已含 "## CommitMode: none" / "## Acceptance: skip-verify",避免服务端弱验收误判 failed。',
+        'Dispatch a task to a CoAgentHub executor by sending a directed message: finds the participant whose name contains executorName (default "AtomCode") and sends audience="participant" with that participant id, which creates and schedules a task. Returns the message id. groupId 可选:不传时优先用当前会话已保存的工作区映射(per-session,须在群列表中),否则按当前工作区 cwd 反查匹配群;都找不到会报错提示手动传 groupId。若任务需求存在歧义(如效果/范围/验收不清晰),必须先向用户澄清要点,得到确认后再下发任务书。可选结构化字段 goal/scope/acceptance/tests/report/priority/dependencies 会被渲染进任务书;只传 body 时原样发送(完全兼容)。planOnly=true 时只生成任务书预览(与真实下发渲染完全一致),不发送给执行器、不创建任务;返回 { planned: true, taskBook }。commitMode 控制任务书是否追加 "## CommitMode: none" 标记(auto 默认:按任务内容保守自动判断,只读/发布/纯 API/环境操作等不产生代码提交的任务会自动追加;none:强制追加,已含标记或 ## Acceptance: skip-verify 时不重复;default:不追加保持原样)。派发只读/发布/纯 API/环境操作等不产生代码提交的任务时,应传 commitMode="none" 或保证 body 已含 "## CommitMode: none" / "## Acceptance: skip-verify",避免服务端弱验收误判 failed。Spec-Driven workflow: before dispatching, ensure a Spec document exists in specs/ and pass specRef to link it. The executor will see the Spec reference in the task ticket and must follow it. If specRef is not provided, the task runs in legacy mode.',
       parameters: {
         groupId: { type: 'string', description: 'Target group id. 可选:不传时自动回填(当前会话 per-session 映射优先 → 当前工作区 cwd 反查兜底)。' },
         body: { type: 'string', required: true, description: 'Task brief sent to the executor (plain text, kept verbatim).' },
@@ -559,6 +559,16 @@ export function createCoAgentHubTools(
           type: 'boolean',
           default: false,
           description: 'Dry-run 预览:true 时只渲染任务书,不发给执行器、不创建任务;默认 false 真实下发。',
+        },
+        specRef: {
+          type: 'string',
+          description:
+            '规范文档路径(如 specs/feature-x.md),最长 500 字符。传入后服务端任务书自动插入「关联规范」段,执行器按此规范执行;不传时行为不变。',
+        },
+        specHash: {
+          type: 'string',
+          description:
+            '规范文档的 Git Hash(版本快照),最长 64 字符,用于审计和版本锁定;可选。',
         },
         goal: { type: 'string', description: '目标:要达成的结果。' },
         scope: { type: 'string', description: '范围:涉及/不涉及的边界。' },
@@ -598,6 +608,8 @@ export function createCoAgentHubTools(
         executorName?: string
         commitMode?: CommitMode
         planOnly?: boolean
+        specRef?: string
+        specHash?: string
         goal?: string
         scope?: string
         acceptance?: string
@@ -618,6 +630,9 @@ export function createCoAgentHubTools(
           report: args.report,
           priority: args.priority,
           dependencies: args.dependencies,
+          // 真实下发时「关联规范」段由服务端插入,客户端只在 planOnly 预览中
+          // 渲染,让协调者先确认 Spec 引用是否正确。
+          ...(args.planOnly === true ? { specRef: args.specRef, specHash: args.specHash } : {}),
         })
         if (args.planOnly === true) {
           return { planned: true, taskBook }
@@ -636,6 +651,10 @@ export function createCoAgentHubTools(
             audience: 'participant',
             audienceRef: executor.id,
             ...(sessionId !== null ? { metadata: { dispatcherSessionId: sessionId } } : {}),
+            // Spec-Driven 派发:透传 specRef/specHash,服务端据此在任务书中
+            // 插入「关联规范」段;不传时请求体不包含这两个字段(向后兼容)。
+            ...(args.specRef !== undefined ? { specRef: args.specRef } : {}),
+            ...(args.specHash !== undefined ? { specHash: args.specHash } : {}),
           })
           return {
             messageId: message.id,

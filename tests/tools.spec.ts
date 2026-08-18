@@ -1420,6 +1420,95 @@ describe('commander tools (list_groups / get_group / list_executors / get_task /
     expect(result.taskBook).toContain('无')
   })
 
+  it('dispatch_task exposes specRef/specHash params with max-length guidance and Spec-Driven description', async () => {
+    const client = clientWith(() => Promise.resolve([]))
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    expect(tool.description).toContain('Spec-Driven workflow')
+    expect(tool.description).toContain('pass specRef to link it')
+    expect(tool.description).toContain('If specRef is not provided, the task runs in legacy mode.')
+    const params = (tool.parameters as { properties: Record<string, { type?: string; description?: string }> })
+      .properties
+    expect(params.specRef).toMatchObject({ type: 'string' })
+    expect(params.specRef?.description).toContain('最长 500 字符')
+    expect(params.specHash).toMatchObject({ type: 'string' })
+    expect(params.specHash?.description).toContain('最长 64 字符')
+  })
+
+  it('dispatch_task passes specRef/specHash through to the POST body', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    await execute(tool, {
+      groupId: 'g1',
+      body: '按规范实现登录页',
+      specRef: 'specs/login.md',
+      specHash: 'abc123',
+    })
+
+    const [, init] = postMessage.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect(body.specRef).toBe('specs/login.md')
+    expect(body.specHash).toBe('abc123')
+  })
+
+  it('dispatch_task omits specRef/specHash from the POST body when not provided', async () => {
+    const postMessage = vi.fn().mockResolvedValue({ id: 'm1', createdAt: '' })
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    await execute(tool, { groupId: 'g1', body: '任务' })
+
+    const [, init] = postMessage.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect('specRef' in body).toBe(false)
+    expect('specHash' in body).toBe(false)
+  })
+
+  it('dispatch_task with planOnly renders the Spec reference section into the preview', async () => {
+    const postMessage = vi.fn()
+    const client = clientWith((url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/participants')) {
+        return Promise.resolve([participant({ id: 'e-atom', name: 'AtomCode 执行器' })])
+      }
+      return postMessage(url, init)
+    })
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = (await execute(tool, {
+      groupId: 'g1',
+      body: '实现登录页',
+      specRef: 'specs/login.md',
+      specHash: 'abc123',
+      planOnly: true,
+    })) as { planned: boolean; taskBook: string }
+
+    expect(postMessage).not.toHaveBeenCalled()
+    expect(result.planned).toBe(true)
+    expect(result.taskBook).toContain('## 📜 关联规范')
+    expect(result.taskBook).toContain('规范文档: specs/login.md')
+    expect(result.taskBook).toContain('Git Hash: abc123')
+  })
+
+  it('dispatch_task with planOnly keeps the taskBook verbatim when no specRef is given', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('planOnly must not hit the network'))
+    const client = clientWith(fetchImpl)
+    const tool = createCoAgentHubTools(client).find(t => t.name === 'coagenthub_dispatch_task')!
+    const result = (await execute(tool, { body: '预览任务', planOnly: true })) as {
+      planned: boolean
+      taskBook: string
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(result.taskBook).toBe('预览任务')
+  })
+
   it('get_workspace_instructions reads COAGENTHUB.md from the workspace root', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coagenthub-ws-'))
     try {

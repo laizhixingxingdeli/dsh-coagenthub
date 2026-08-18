@@ -74,6 +74,10 @@ export interface TaskBookInput {
   priority?: string
   /** 依赖:前置条件或依赖项。 */
   dependencies?: string
+  /** 规范文档路径(如 specs/feature-x.md);非空时渲染「关联规范」段(planOnly 预览用)。 */
+  specRef?: string
+  /** 规范文档的 Git Hash(版本快照);可选,随 specRef 一起展示。 */
+  specHash?: string
 }
 
 /** Section header order: goal first, dependencies last. */
@@ -100,16 +104,16 @@ function isFilled(value: string | undefined): value is string {
 export function buildTaskBook(input: TaskBookInput): string {
   const filledSections = SECTION_HEADERS.filter(([key]) => isFilled(input[key]))
   const body = input.body ?? ''
-  let taskBook: string
-  if (filledSections.length === 0) {
-    taskBook = body
-  } else {
-    const parts: string[] = []
-    if (body.trim() !== '') parts.push(body.trim())
-    for (const [key, header] of filledSections) {
-      parts.push(`## ${header}\n\n${input[key]!.trim()}`)
-    }
-    taskBook = parts.join('\n\n')
+  const parts: string[] = []
+  if (body.trim() !== '') parts.push(body.trim())
+  if (isFilled(input.specRef)) {
+    const specLines = [`## 📜 关联规范`, '', `规范文档: ${input.specRef.trim()}`]
+    if (isFilled(input.specHash)) specLines.push(`Git Hash: ${input.specHash.trim()}`)
+    parts.push(specLines.join('\n'))
   }
+  for (const [key, header] of filledSections) {
+    parts.push(`## ${header}\n\n${input[key]!.trim()}`)
+  }
+  const taskBook = parts.length === 0 ? body : parts.join('\n\n')
   return applyCommitMode(taskBook, input.commitMode)
 }
