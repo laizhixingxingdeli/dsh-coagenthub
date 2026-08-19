@@ -12,7 +12,7 @@
  * @module @laizhixingxingdeli/dsh-coagenthub/completion-consumer
  */
 
-import type { CoAgentHubClient, CompletionInboxItem } from './client.ts'
+import type { CoAgentHubClient, CompletionEventEnvelope, CompletionInboxItem } from './client.ts'
 import type { CoAgentHubNotification } from './notification-queue.ts'
 import type { NotificationDeliverer } from './notify.ts'
 import { DedupeStore } from './dedupe-store.ts'
@@ -60,7 +60,7 @@ export function notificationTypeForCompletionStatus(status: string | null): CoAg
 }
 
 /** Convert a claimed completion event into a routable notification. */
-export function notificationFromEvent(event: CompletionInboxItem): CoAgentHubNotification {
+export function notificationFromEvent(event: CompletionEventEnvelope): CoAgentHubNotification {
   const diffSummary = event.task.diffSummary as
     | { summary?: string | null; error?: string | null }
     | null
@@ -154,7 +154,7 @@ export class CompletionConsumer {
    * id is recorded only after a successful followup, before ack; ack failure
    * leaves it recorded so a retry only re-acks.
    */
-  private async deliverAndAck(event: CompletionInboxItem, leaseToken: string): Promise<void> {
+  private async deliverAndAck(event: CompletionEventEnvelope, leaseToken: string): Promise<void> {
     const notification = notificationFromEvent(event)
     try {
       this.deliverer.deliver(notification)

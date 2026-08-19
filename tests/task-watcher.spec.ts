@@ -1,5 +1,14 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CoAgentHubClient } from '../src/client.ts'
+import {
+  CompletionConsumer,
+  notificationFromEvent,
+  notificationTypeForCompletionStatus,
+} from '../src/completion-consumer.ts'
+import { DedupeStore } from '../src/dedupe-store.ts'
 import { notificationQueue, type CoAgentHubNotification } from '../src/notification-queue.ts'
 import { createNotificationDeliverer, formatNotification } from '../src/notify.ts'
 import { TaskWatcher, notificationTypeFor } from '../src/task-watcher.ts'
@@ -15,39 +24,67 @@ function wsStub() {
   } as unknown as CoAgentHubWsClient
 }
 
-function clientStub(overrides: Partial<{
-  groups: unknown[]
-  tasks: unknown[]
-  tasksByGroup: Record<string, unknown[]>
-  participants: unknown[]
-}> = {}) {
-  const groups = overrides.groups ?? [{ id: 'g1' }]
-  const client = {
-    listGroups: vi.fn().mockResolvedValue({ items: groups, total: groups.length }),
-    listTasks: vi.fn().mockImplementation(async (groupId: string) =>
-      overrides.tasksByGroup?.[groupId] ?? overrides.tasks ?? []),
-    listParticipants: vi.fn().mockResolvedValue(overrides.participants ?? []),
-  } as unknown as CoAgentHubClient
-  return client
+/** Typed fake inbox event used across consumer tests (envelope + delivery state). */
+interface FakeInboxEvent {
+  schemaVersion: 1
+  type: 'coagenthub.task.completed'
+  eventId: string
+  dispatcherParticipantId: string | null
+  dispatcherSessionId: string | null
+  callbackRef: Record<string, unknown> | null
+  task: {
+    groupId: string
+    taskId: string
+    status: string
+    specRef: string | null
+    specHash: string | null
+    diffSummary: { summary?: string; error?: string } | null
+    outputTail: unknown
+  }
+  state: string
+  attempts: number
+  nextAttemptAt: string | null
+}
+
+function fakeEvent(id: string, status = 'done'): FakeInboxEvent {
+  return {
+    schemaVersion: 1,
+    type: 'coagenthub.task.completed',
+    eventId: id,
+    dispatcherParticipantId: null,
+    dispatcherSessionId: null,
+    callbackRef: null,
+    task: { groupId: 'g1', taskId: `task-${id}`, status, specRef: null, specHash: null, diffSummary: { summary: 's' }, outputTail: null },
+    state: 'pending',
+    attempts: 0,
+    nextAttemptAt: null,
+  }
+}
+
+/** Completion-consumer stub: the watcher only drives `consume()`. */
+function consumerStub() {
+  const consumed = vi.fn<() => Promise<number>>().mockResolvedValue(0)
+  return { consumed, consumer: { consume: consumed } as unknown as CompletionConsumer }
 }
 
 function makeWatcher(overrides: Partial<{
-  client: CoAgentHubClient
   ws: CoAgentHubWsClient
-  pollIntervalMs: number
+  consumeIntervalMs: number
 }> = {}) {
   const delivered: CoAgentHubNotification[] = []
   const deliverer = createNotificationDeliverer((notification) => {
     delivered.push(notification)
   })
   const ws = overrides.ws ?? wsStub()
+  const { consumed, consumer } = consumerStub()
   const watcher = new TaskWatcher({
-    client: overrides.client ?? clientStub(),
+    client: clientStub(),
     ws,
     deliver: deliverer,
-    pollIntervalMs: overrides.pollIntervalMs ?? 4_000,
+    consumer,
+    consumeIntervalMs: overrides.consumeIntervalMs ?? 4_000,
   })
-  return { watcher, ws, delivered }
+  return { watcher, ws, consumer, consumed, delivered }
 }
 
 afterEach(() => {
@@ -98,9 +135,15 @@ describe('formatNotification', () => {
 })
 
 describe('TaskWatcher.handleFrame', () => {
-  it('does not deliver a notification for group_message frames', () => {
+  it('triggers an immediate inbox consume on task_completion_available frames', () => {
+    const { watcher, consumed } = makeWatcher()
+    watcher.handleFrame({ type: 'task_completion_available', groupId: 'g1' })
+    expect(consumed).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not deliver a notification for task_completion_available (durable inbox is authoritative)', () => {
     const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'group_message', groupId: 'g1' })
+    watcher.handleFrame({ type: 'task_completion_available', groupId: 'g1' })
     expect(delivered).toHaveLength(0)
   })
 
@@ -110,358 +153,380 @@ describe('TaskWatcher.handleFrame', () => {
     expect(delivered).toHaveLength(1)
     expect(delivered[0]).toMatchObject({ type: 'task.stalled', groupId: 'g1', taskId: 't1', status: 'stalled' })
     expect(delivered[0]!.executorName).toBe('AtomCode 执行器')
+    expect(delivered[0]!.summary).toBeUndefined()
   })
 
-  it('delivers only terminal statuses on task_status_changed frames', () => {
+  it('passes dispatcher fields from task_stall_alert into the notification', () => {
     const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'done', summary: '完成' })
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't2', status: 'failed' })
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'stalled' })
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't4', status: 'running' })
-    expect(delivered.map(notification => notification.type)).toEqual([
-      'task.completed',
-      'task.failed',
-      'task.stalled',
-    ])
-    expect(delivered[0]!.summary).toBe('完成')
-  })
-
-  it('ignores task_output frames without a terminal status (streaming noise)', () => {
-    const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'task_output', groupId: 'g1', taskId: 't1', status: 'running' })
-    watcher.handleFrame({ type: 'task_output', groupId: 'g1', taskId: 't1', output: 'progress…' })
-    expect(delivered).toHaveLength(0)
-    watcher.handleFrame({ type: 'task_output', groupId: 'g1', taskId: 't1', status: 'done' })
+    watcher.handleFrame({ type: 'task_stall_alert', groupId: 'g1', taskId: 't1', dispatcherSessionId: 's', dispatcherParticipantId: 'p' })
     expect(delivered).toHaveLength(1)
-    expect(delivered[0]!.type).toBe('task.completed')
+    expect(delivered[0]).toMatchObject({ type: 'task.stalled', dispatcherSessionId: 's', dispatcherParticipantId: 'p' })
   })
 
-  it('ignores frames without a groupId', () => {
+  it('tolerates missing/null/empty dispatcher fields on stall frames (treated as absent)', () => {
     const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'group_message' })
-    watcher.handleFrame({ type: 'task_stall_alert', taskId: 't1' })
-    expect(delivered).toHaveLength(0)
-  })
-
-  it('delivers terminal frames from every group (isolation happens at drain time)', () => {
-    const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g2', taskId: 't1', status: 'done' })
-    watcher.handleFrame({ type: 'task_stall_alert', groupId: 'g2', taskId: 't2', status: 'stalled' })
+    watcher.handleFrame({ type: 'task_stall_alert', groupId: 'g1', taskId: 't1' })
+    watcher.handleFrame({ type: 'task_stall_alert', groupId: 'g1', taskId: 't2', dispatcherSessionId: null, dispatcherParticipantId: '  ' })
     expect(delivered).toHaveLength(2)
-    expect(delivered.map(notification => notification.groupId)).toEqual(['g2', 'g2'])
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'done' })
-    expect(delivered).toHaveLength(3)
-    expect(delivered[2]!.groupId).toBe('g1')
-  })
-
-  it('ignores frames without a groupId (cannot attribute)', () => {
-    const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'task_status_changed', taskId: 't1', status: 'done' })
-    watcher.handleFrame({ type: 'task_stall_alert', taskId: 't2', status: 'stalled' })
-    expect(delivered).toHaveLength(0)
-  })
-
-  it('skips queued/running status on task_status_changed frames but delivers done', () => {
-    const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'queued' })
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't2', status: 'running' })
-    expect(delivered).toHaveLength(0)
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'done' })
-    expect(delivered.map(notification => notification.type)).toEqual(['task.completed'])
-  })
-
-  it('skips queued status on task_output frames', () => {
-    const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'task_output', groupId: 'g1', taskId: 't1', status: 'queued', output: '排队中…' })
-    expect(delivered).toHaveLength(0)
-  })
-
-  it('passes dispatcherSessionId/dispatcherParticipantId from terminal frames into the notification', () => {
-    const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({
-      type: 'task_status_changed',
-      groupId: 'g1',
-      taskId: 't1',
-      status: 'done',
-      dispatcherSessionId: 'session-x',
-      dispatcherParticipantId: 'p1',
-    })
-    watcher.handleFrame({
-      type: 'task_stall_alert',
-      groupId: 'g1',
-      taskId: 't2',
-      dispatcherSessionId: 'session-y',
-      dispatcherParticipantId: 'p2',
-    })
-    expect(delivered).toHaveLength(2)
-    expect(delivered[0]).toMatchObject({ type: 'task.completed', dispatcherSessionId: 'session-x', dispatcherParticipantId: 'p1' })
-    expect(delivered[1]).toMatchObject({ type: 'task.stalled', dispatcherSessionId: 'session-y', dispatcherParticipantId: 'p2' })
-  })
-
-  it('tolerates missing/null/empty dispatcher fields on frames (treated as absent)', () => {
-    const { watcher, delivered } = makeWatcher()
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'done' })
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't2', status: 'done', dispatcherSessionId: null })
-    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't3', status: 'done', dispatcherSessionId: '  ' })
-    expect(delivered).toHaveLength(3)
     for (const notification of delivered) {
       expect(notification.dispatcherSessionId).toBeUndefined()
       expect(notification.dispatcherParticipantId).toBeUndefined()
     }
   })
+
+  it('ignores legacy frame types (task_status_changed / task_output / group_message): completion is inbox-authoritative', () => {
+    const { watcher, delivered, consumed } = makeWatcher()
+    watcher.handleFrame({ type: 'task_status_changed', groupId: 'g1', taskId: 't1', status: 'done' })
+    watcher.handleFrame({ type: 'task_output', groupId: 'g1', taskId: 't1', status: 'done' })
+    watcher.handleFrame({ type: 'group_message', groupId: 'g1' })
+    expect(delivered).toHaveLength(0)
+    expect(consumed).not.toHaveBeenCalled()
+  })
+
+  it('ignores frames without a groupId', () => {
+    const { watcher, delivered } = makeWatcher()
+    watcher.handleFrame({ type: 'task_stall_alert', taskId: 't1' })
+    watcher.handleFrame({ type: 'task_completion_available' })
+    watcher.handleFrame({ type: 'group_message' })
+    expect(delivered).toHaveLength(0)
+  })
+
+  it('ignores task_stall_alert frames without a taskId', () => {
+    const { watcher, delivered } = makeWatcher()
+    watcher.handleFrame({ type: 'task_stall_alert', groupId: 'g1' })
+    expect(delivered).toHaveLength(0)
+  })
 })
 
-describe('TaskWatcher.pollOnce', () => {
-  it('records a baseline on first poll and notifies only on terminal transitions', async () => {
-    const tasks: Array<Record<string, unknown>> = [
-      { id: 't1', groupId: 'g1', status: 'queued', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' },
-    ]
-    const client = clientStub({ tasks, participants: [{ id: 'e1', name: 'AtomCode 执行器' }] })
-    const { watcher, delivered } = makeWatcher({ client })
-
-    await watcher.pollOnce() // 基线:不通知
-    expect(delivered).toHaveLength(0)
-
-    tasks[0] = { ...tasks[0]!, status: 'running' }
-    await watcher.pollOnce() // 中间态:只更新基线,不通知
-    expect(delivered).toHaveLength(0)
-
-    tasks[0] = { ...tasks[0]!, status: 'done', diffSummary: { summary: '完成', hash: 'h', error: null } }
-    await watcher.pollOnce()
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done' })
-    expect(delivered[0]!.summary).toBe('完成')
-
-    // 状态不变:不再通知
-    await watcher.pollOnce()
-    expect(delivered).toHaveLength(1)
+describe('notificationTypeForCompletionStatus', () => {
+  it('maps completion statuses to notification types (cancelled is a terminal failure)', () => {
+    expect(notificationTypeForCompletionStatus('done')).toBe('task.completed')
+    expect(notificationTypeForCompletionStatus('failed')).toBe('task.failed')
+    expect(notificationTypeForCompletionStatus('cancelled')).toBe('task.failed')
+    expect(notificationTypeForCompletionStatus('stalled')).toBe('task.stalled')
+    expect(notificationTypeForCompletionStatus(null)).toBe('task.status_changed')
   })
+})
 
-  it('does nothing when there are no groups', async () => {
-    const client = clientStub({ groups: [] })
-    const { watcher, delivered } = makeWatcher({ client })
-    await watcher.pollOnce()
-    expect(client.listTasks).not.toHaveBeenCalled()
-    expect(delivered).toHaveLength(0)
-  })
-
-  it('polls every group and notifies per group with the right groupId', async () => {
-    const tasksByGroup: Record<string, Array<Record<string, unknown>>> = {
-      g1: [{ id: 't1', groupId: 'g1', status: 'queued', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }],
-      g2: [{ id: 't2', groupId: 'g2', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }],
-    }
-    const client = clientStub({
-      groups: [{ id: 'g1' }, { id: 'g2' }],
-      tasksByGroup,
-      participants: [{ id: 'e1', name: 'AtomCode 执行器' }],
-    })
-    const { watcher, delivered } = makeWatcher({ client })
-
-    await watcher.pollOnce() // 基线:两个群各一个任务,不通知
-    expect(delivered).toHaveLength(0)
-    expect(client.listTasks).toHaveBeenCalledTimes(2)
-
-    tasksByGroup.g1![0] = { ...tasksByGroup.g1![0]!, status: 'done', diffSummary: { summary: '完成', hash: 'h', error: null } }
-    tasksByGroup.g2![0] = { ...tasksByGroup.g2![0]!, status: 'failed', diffSummary: { summary: '报错', hash: null, error: 'x' } }
-    await watcher.pollOnce()
-    expect(delivered).toHaveLength(2)
-    expect(delivered[0]).toMatchObject({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done' })
-    expect(delivered[1]).toMatchObject({ type: 'task.failed', groupId: 'g2', taskId: 't2', status: 'failed' })
-  })
-
-  it('keeps per-group baselines independent (same task id in two groups)', async () => {
-    const tasksByGroup: Record<string, Array<Record<string, unknown>>> = {
-      g1: [{ id: 't1', groupId: 'g1', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }],
-      g2: [{ id: 't1', groupId: 'g2', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }],
-    }
-    const client = clientStub({
-      groups: [{ id: 'g1' }, { id: 'g2' }],
-      tasksByGroup,
-      participants: [{ id: 'e1', name: 'AtomCode 执行器' }],
-    })
-    const { watcher, delivered } = makeWatcher({ client })
-
-    await watcher.pollOnce() // 基线
-    tasksByGroup.g2![0] = { ...tasksByGroup.g2![0]!, status: 'done', diffSummary: { summary: 's', hash: 'h', error: null } }
-    await watcher.pollOnce()
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({ type: 'task.completed', groupId: 'g2', taskId: 't1' })
-  })
-
-  it('swallows client failures silently', async () => {
-    const client = {
-      listGroups: vi.fn().mockRejectedValue(new Error('boom')),
-      listTasks: vi.fn(),
-      listParticipants: vi.fn(),
-    } as unknown as CoAgentHubClient
-    const { watcher, delivered } = makeWatcher({ client })
-    await expect(watcher.pollOnce()).resolves.toBeUndefined()
-    expect(delivered).toHaveLength(0)
-  })
-
-  it('isolates a failing group without dropping other groups', async () => {
-    const listTasks = vi.fn().mockImplementation(async (groupId: string) => {
-      if (groupId === 'g1') throw new Error('boom')
-      return [{ id: 't2', groupId: 'g2', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' }]
-    })
-    const client = {
-      listGroups: vi.fn().mockResolvedValue({ items: [{ id: 'g1' }, { id: 'g2' }], total: 2 }),
-      listTasks,
-      listParticipants: vi.fn().mockResolvedValue([]),
-    } as unknown as CoAgentHubClient
-    const { watcher, delivered } = makeWatcher({ client })
-
-    await watcher.pollOnce() // 基线:g1 失败, g2 记录基线
-    expect(delivered).toHaveLength(0)
-
-    listTasks.mockImplementation(async (groupId: string) => {
-      if (groupId === 'g1') throw new Error('boom')
-      return [{ id: 't2', groupId: 'g2', status: 'done', executorParticipantId: 'e1', brief: 'b', diffSummary: { summary: 's', hash: 'h', error: null }, createdAt: 'c', updatedAt: 'u' }]
-    })
-    await watcher.pollOnce()
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({ type: 'task.completed', groupId: 'g2', taskId: 't2' })
-  })
-
-  it('does not notify on intermediate status changes (running/queued) but notifies on terminal ones', async () => {
-    const tasks: Array<Record<string, unknown>> = [
-      { id: 't1', groupId: 'g1', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' },
-    ]
-    const client = clientStub({ tasks, participants: [{ id: 'e1', name: 'AtomCode 执行器' }] })
-    const { watcher, delivered } = makeWatcher({ client })
-
-    await watcher.pollOnce() // 基线:running,不通知
-    expect(delivered).toHaveLength(0)
-
-    tasks[0] = { ...tasks[0]!, status: 'queued' }
-    await watcher.pollOnce() // running→queued:不通知
-    expect(delivered).toHaveLength(0)
-
-    tasks[0] = { ...tasks[0]!, status: 'running' }
-    await watcher.pollOnce() // queued→running:不通知
-    expect(delivered).toHaveLength(0)
-
-    tasks[0] = { ...tasks[0]!, status: 'failed' }
-    await watcher.pollOnce() // running→failed:终态,通知
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({ type: 'task.failed', groupId: 'g1', taskId: 't1', status: 'failed' })
-  })
-
-  it('notifies on stalled transitions', async () => {
-    const tasks: Array<Record<string, unknown>> = [
-      { id: 't1', groupId: 'g1', status: 'running', executorParticipantId: 'e1', brief: 'b', diffSummary: null, createdAt: 'c', updatedAt: 'u' },
-    ]
-    const client = clientStub({ tasks, participants: [{ id: 'e1', name: 'AtomCode 执行器' }] })
-    const { watcher, delivered } = makeWatcher({ client })
-
-    await watcher.pollOnce() // 基线:running,不通知
-    expect(delivered).toHaveLength(0)
-
-    tasks[0] = { ...tasks[0]!, status: 'stalled' }
-    await watcher.pollOnce() // running→stalled:终态,通知
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({ type: 'task.stalled', groupId: 'g1', taskId: 't1', status: 'stalled' })
-  })
-
-  it('passes dispatcher fields from polled tasks into the notification', async () => {
-    const tasks: Array<Record<string, unknown>> = [
-      {
-        id: 't1',
+describe('notificationFromEvent', () => {
+  it('builds a routable notification and carries eventId/dispatcher fields', () => {
+    const n = notificationFromEvent({
+      schemaVersion: 1,
+      type: 'coagenthub.task.completed',
+      eventId: 'evt-1',
+      dispatcherParticipantId: 'p1',
+      dispatcherSessionId: 'session-x',
+      callbackRef: null,
+      task: {
         groupId: 'g1',
-        status: 'running',
-        executorParticipantId: 'e1',
-        brief: 'b',
-        diffSummary: null,
-        dispatcherSessionId: 'session-x',
-        dispatcherParticipantId: 'p1',
-        createdAt: 'c',
-        updatedAt: 'u',
+        taskId: 't1',
+        status: 'done',
+        specRef: null,
+        specHash: null,
+        diffSummary: { summary: '完成' },
+        outputTail: null,
       },
-    ]
-    const client = clientStub({ tasks, participants: [{ id: 'e1', name: 'AtomCode 执行器' }] })
-    const { watcher, delivered } = makeWatcher({ client })
-
-    await watcher.pollOnce() // 基线
-    tasks[0] = { ...tasks[0]!, status: 'done', diffSummary: { summary: '完成', hash: 'h', error: null } }
-    await watcher.pollOnce()
-
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toMatchObject({
+    })
+    expect(n).toMatchObject({
       type: 'task.completed',
       groupId: 'g1',
       taskId: 't1',
+      status: 'done',
+      summary: '完成',
       dispatcherSessionId: 'session-x',
       dispatcherParticipantId: 'p1',
+      eventId: 'evt-1',
     })
+    expect(typeof n.time).toBe('string')
   })
 
-  it('tolerates missing/null dispatcher fields on polled tasks (treated as absent)', async () => {
-    const tasks: Array<Record<string, unknown>> = [
-      {
-        id: 't1',
-        groupId: 'g1',
-        status: 'queued',
-        executorParticipantId: 'e1',
-        brief: 'b',
-        diffSummary: null,
-        dispatcherSessionId: null,
-        dispatcherParticipantId: undefined,
-        createdAt: 'c',
-        updatedAt: 'u',
+  it('falls back to diffSummary.error and tolerates missing fields', () => {
+    const n = notificationFromEvent({
+      schemaVersion: 1,
+      type: 'coagenthub.task.completed',
+      eventId: 'evt-2',
+      dispatcherParticipantId: null,
+      dispatcherSessionId: null,
+      callbackRef: null,
+      task: { groupId: 'g1', taskId: 't2', status: 'failed', specRef: null, specHash: null, diffSummary: { error: 'boom' }, outputTail: null },
+    })
+    expect(n).toMatchObject({ type: 'task.failed', summary: 'boom' })
+    expect(n.dispatcherSessionId).toBeUndefined()
+    expect(n.dispatcherParticipantId).toBeUndefined()
+    expect(n.eventId).toBe('evt-2')
+  })
+})
+
+describe('CompletionConsumer.consume', () => {
+  function makeConsumer({
+    client = {},
+    deliverer,
+  }: {
+    client?: Partial<CoAgentHubClient>
+    deliverer: ReturnType<typeof createNotificationDeliverer>
+  }) {
+    const merge: Partial<CoAgentHubClient> = {
+      listCompletionEvents: vi.fn().mockResolvedValue({ events: [] }),
+      claimCompletionEvent: vi.fn().mockRejectedValue(new Error('not claimable')),
+      ackCompletionEvent: vi.fn().mockResolvedValue({ success: true, eventId: '' }),
+      failCompletionEvent: vi.fn().mockResolvedValue({ success: true, eventId: '', attempts: 1, state: 'failed', nextAttemptAt: null }),
+      ...client,
+    }
+    const consumer = new CompletionConsumer({
+      client: merge as unknown as CoAgentHubClient,
+      consumerId: 'consumer-test',
+      participantId: 'me',
+      deliverer,
+      dedupe: new DedupeStore(100, null),
+      leaseMs: 30_000,
+      retryAfterMs: 60_000,
+    })
+    return { consumer, merge }
+  }
+
+  it('claims, delivers, records dedupe, and acks each listed event', async () => {
+    const delivered: CoAgentHubNotification[] = []
+    const deliverer = createNotificationDeliverer((n) => delivered.push(n))
+    const listed: FakeInboxEvent[] = [fakeEvent('evt-1'), fakeEvent('evt-2', 'failed')]
+    const { consumer, merge } = makeConsumer({
+      deliverer,
+      client: {
+        listCompletionEvents: vi.fn().mockResolvedValue({ events: listed }),
+        claimCompletionEvent: vi.fn().mockImplementation(async (_p, eventId) => {
+          const hit = listed.find((e) => e.eventId === eventId)!
+          return { leaseToken: `lease-${eventId}`, event: { ...hit, state: 'claimed', attempts: 1, nextAttemptAt: null } }
+        }),
       },
-    ]
-    const client = clientStub({ tasks, participants: [{ id: 'e1', name: 'AtomCode 执行器' }] })
-    const { watcher, delivered } = makeWatcher({ client })
+    })
+    const acked = await consumer.consume()
+    expect(acked).toBe(2)
+    expect(merge.claimCompletionEvent).toHaveBeenCalledTimes(2)
+    expect(merge.ackCompletionEvent).toHaveBeenCalledTimes(2)
+    expect(delivered.map(n => n.eventId)).toEqual(['evt-1', 'evt-2'])
+    expect(delivered[0]).toMatchObject({ type: 'task.completed', taskId: 'task-evt-1' })
+    expect(delivered[1]).toMatchObject({ type: 'task.failed', taskId: 'task-evt-2' })
+  })
 
-    await watcher.pollOnce() // 基线
-    tasks[0] = { ...tasks[0]!, status: 'done', diffSummary: { summary: 's', hash: 'h', error: null } }
-    await watcher.pollOnce()
+  it('records the eventId in the dedupe store after a successful followup but before ack', async () => {
+    const delivered: CoAgentHubNotification[] = []
+    const deliverer = createNotificationDeliverer((n) => delivered.push(n))
+    const dedupe = new DedupeStore(100, null)
+    const { merge } = makeConsumer({
+      deliverer,
+      client: {
+        listCompletionEvents: vi.fn().mockResolvedValue({ events: [{ ...fakeEvent('evt-1'), state: 'pending' }] }),
+        claimCompletionEvent: vi.fn().mockResolvedValue({ leaseToken: 'lease', event: { ...fakeEvent('evt-1'), state: 'claimed', attempts: 1, nextAttemptAt: null } }),
+        ackCompletionEvent: vi.fn().mockRejectedValue(new Error('ack transient')),
+      },
+    })
+    const consumer = new CompletionConsumer({
+      client: merge as unknown as CoAgentHubClient,
+      consumerId: 'consumer-test',
+      participantId: 'me',
+      deliverer,
+      dedupe,
+      leaseMs: 30_000,
+      retryAfterMs: 60_000,
+    })
+    expect(await consumer.consume()).toBe(0) // ack failed → not counted as acked
+    expect(delivered).toHaveLength(1) // followup ran once
+    expect(dedupe.has('evt-1')).toBe(true) // recorded before the failed ack
+  })
 
+  it('does not followup again for an already-deduped event; only retries the ack', async () => {
+    const delivered: CoAgentHubNotification[] = []
+    const deliverer = createNotificationDeliverer((n) => delivered.push(n))
+    const dedupe = new DedupeStore(100, null)
+    dedupe.add('evt-1')
+    const { merge } = makeConsumer({
+      deliverer,
+      client: {
+        listCompletionEvents: vi.fn().mockResolvedValue({ events: [{ ...fakeEvent('evt-1'), state: 'pending' }] }),
+        claimCompletionEvent: vi.fn().mockResolvedValue({ leaseToken: 'lease', event: { ...fakeEvent('evt-1'), state: 'claimed', attempts: 1, nextAttemptAt: null } }),
+        ackCompletionEvent: vi.fn().mockResolvedValue({ success: true, eventId: 'evt-1' }),
+      },
+    })
+    const rebuiltConsumer = new CompletionConsumer({
+      client: merge as unknown as CoAgentHubClient,
+      consumerId: 'consumer-test',
+      participantId: 'me',
+      deliverer,
+      dedupe,
+      leaseMs: 30_000,
+      retryAfterMs: 60_000,
+    })
+    expect(await rebuiltConsumer.consume()).toBe(1)
+    expect(delivered).toHaveLength(0) // not followup'd again
+    expect(merge.claimCompletionEvent).toHaveBeenCalledTimes(1) // re-claim for fresh lease
+    expect(merge.ackCompletionEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails the event back (no ack, no dedupe) when the deliverer throws synchronously', async () => {
+    const boom = new Error('no agent')
+    const deliverer = { deliver: vi.fn(() => { throw boom }) } as unknown as ReturnType<typeof createNotificationDeliverer>
+    const { consumer, merge } = makeConsumer({
+      deliverer,
+      client: {
+        listCompletionEvents: vi.fn().mockResolvedValue({ events: [{ ...fakeEvent('evt-1'), state: 'pending' }] }),
+        claimCompletionEvent: vi.fn().mockResolvedValue({ leaseToken: 'lease', event: { ...fakeEvent('evt-1'), state: 'claimed', attempts: 1, nextAttemptAt: null } }),
+      },
+    })
+    // re-claim will be rejected since claim is called again? It is called once here.
+    // consume() swallows the per-event delivery error and keeps the pass alive.
+    expect(await consumer.consume()).toBe(0)
+    expect(merge.ackCompletionEvent).not.toHaveBeenCalled()
+    expect(merge.failCompletionEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips an event (no ack) when the claim fails, keeping the pass alive', async () => {
+    const delivered: CoAgentHubNotification[] = []
+    const deliverer = createNotificationDeliverer((n) => delivered.push(n))
+    const { consumer, merge } = makeConsumer({
+      deliverer,
+      client: {
+        listCompletionEvents: vi.fn().mockResolvedValue({ events: [{ ...fakeEvent('evt-1'), state: 'pending' }, { ...fakeEvent('evt-2'), state: 'pending' }] }),
+        claimCompletionEvent: vi.fn().mockImplementation(async (_p, eventId) => {
+          if (eventId === 'evt-1') throw new Error('409')
+          return { leaseToken: 'lease-2', event: { ...fakeEvent(eventId), state: 'claimed', attempts: 1, nextAttemptAt: null } }
+        }),
+      },
+    })
+    expect(await consumer.consume()).toBe(1)
     expect(delivered).toHaveLength(1)
-    expect(delivered[0]!.dispatcherSessionId).toBeUndefined()
-    expect(delivered[0]!.dispatcherParticipantId).toBeUndefined()
+    expect(delivered[0]!.eventId).toBe('evt-2')
+    expect(merge.ackCompletionEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns 0 and swallows when the inbox API is unavailable (old server / network)', async () => {
+    const delivered: CoAgentHubNotification[] = []
+    const deliverer = createNotificationDeliverer((n) => delivered.push(n))
+    const { consumer, merge } = makeConsumer({
+      deliverer,
+      client: {
+        listCompletionEvents: vi.fn().mockRejectedValue(new Error('boom')),
+      },
+    })
+    void merge
+    expect(await consumer.consume()).toBe(0)
+    expect(delivered).toHaveLength(0)
+  })
+
+  it('passes the batchLimit to the server inbox list call', async () => {
+    const delivered: CoAgentHubNotification[] = []
+    const deliverer = createNotificationDeliverer((n) => delivered.push(n))
+    const { merge } = makeConsumer({ deliverer })
+    const events = Array.from({ length: 3 }, (_, i) => fakeEvent(`evt-${i}`))
+    const consumer = new CompletionConsumer({
+      client: merge as unknown as CoAgentHubClient,
+      consumerId: 'consumer-test',
+      participantId: 'me',
+      deliverer,
+      dedupe: new DedupeStore(100, null),
+      leaseMs: 30_000,
+      retryAfterMs: 60_000,
+      batchLimit: 3,
+    })
+    merge.listCompletionEvents = vi.fn().mockResolvedValue({ events })
+    merge.claimCompletionEvent = vi.fn().mockImplementation(async (_p, eventId) => ({ leaseToken: 'lease', event: { ...fakeEvent(eventId), state: 'claimed', attempts: 1, nextAttemptAt: null } }))
+    expect(await consumer.consume()).toBe(3) // server honors limit; consumer trusts the returned count
+    expect(merge.listCompletionEvents).toHaveBeenCalledWith('me', undefined, 3)
+    expect(delivered).toHaveLength(3)
+  })
+})
+
+describe('DedupeStore', () => {
+  it('records ids, detects membership, and never duplicates', () => {
+    const dedupe = new DedupeStore(100, null)
+    expect(dedupe.has('a')).toBe(false)
+    dedupe.add('a')
+    dedupe.add('a')
+    expect(dedupe.has('a')).toBe(true)
+    expect(dedupe.size).toBe(1)
+  })
+
+  it('evicts the oldest ids past its capacity (bounded FIFO)', () => {
+    const dedupe = new DedupeStore(3, null)
+    dedupe.add('a')
+    dedupe.add('b')
+    dedupe.add('c')
+    dedupe.add('d')
+    expect(dedupe.peek()).toEqual(['b', 'c', 'd'])
+    expect(dedupe.has('a')).toBe(false)
+  })
+
+  it('persists and reloads from a JSON file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagenthub-dedupe-'))
+    const file = join(dir, 'dedupe.json')
+    try {
+      const dedupe = new DedupeStore(1000, file)
+      dedupe.add('evt-1')
+      dedupe.add('evt-2')
+      const reloaded = new DedupeStore(1000, file)
+      expect(reloaded.peek()).toEqual(['evt-1', 'evt-2'])
+      expect(reloaded.has('evt-2')).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('starts empty on a missing/corrupt file (memory fallback)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coagenthub-dedupe-'))
+    const file = join(dir, 'missing.json')
+    try {
+      expect(new DedupeStore(100, file).size).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 
 describe('TaskWatcher.start/stop', () => {
-  it('wires the ws frame handler, starts the socket, and polls on an interval', () => {
+  it('wires the ws handler, connects, consumes once on startup, and consumes on the fallback timer', () => {
     vi.useFakeTimers()
-    const { watcher, ws, delivered } = makeWatcher()
+    const { watcher, ws, consumed } = makeWatcher()
     expect(watcher.running).toBe(false)
 
     watcher.start()
     expect(watcher.running).toBe(true)
     expect(ws.start).toHaveBeenCalledTimes(1)
     expect(typeof ws.onEvent).toBe('function')
+    // 启动即消费一次:插件重启期间产生的 event 从 durable inbox 恢复。
+    expect(consumed).toHaveBeenCalledTimes(1)
 
-    // WS 帧直接走 handleFrame
-    ws.onEvent?.({ type: 'task_stall_alert', groupId: 'g1', taskId: 't1' })
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]!.type).toBe('task.stalled')
+    // WS 提示帧直接触发一次即时消费。
+    ws.onEvent?.({ type: 'task_completion_available', groupId: 'g1' })
+    expect(consumed).toHaveBeenCalledTimes(2)
 
-    // 轮询 tick 刷新身份并 poll 一次(无任务,不通知)
+    // 兜底定时器:每次 tick 刷新身份并再消费一次。
     vi.advanceTimersByTime(4_000)
     expect(ws.refreshIdentity).toHaveBeenCalledTimes(1)
+    expect(consumed).toHaveBeenCalledTimes(3)
 
     watcher.stop()
     expect(watcher.running).toBe(false)
     expect(ws.stop).toHaveBeenCalledTimes(1)
+    const callsAtStop = consumed.mock.calls.length
     vi.advanceTimersByTime(8_000)
     expect(ws.refreshIdentity).toHaveBeenCalledTimes(1) // 停止后不再 tick
+    expect(consumed).toHaveBeenCalledTimes(callsAtStop)
   })
 
   it('start is idempotent while running', () => {
-    const { watcher, ws } = makeWatcher()
+    const { watcher, ws, consumed } = makeWatcher()
     watcher.start()
     watcher.start()
     expect(ws.start).toHaveBeenCalledTimes(1)
+    expect(consumed).toHaveBeenCalledTimes(1)
     watcher.stop()
   })
 })
 
 describe('notificationQueue', () => {
-  it('bounds the queue to capacity, dropping the oldest', () => {
+  beforeEach(() => {
     notificationQueue.drain()
+  })
+
+  it('bounds the queue to capacity, dropping the oldest', () => {
     for (let i = 0; i < 205; i += 1) {
       notificationQueue.enqueue({ type: 'task.status_changed', groupId: 'g', taskId: `t${i}`, status: 'running', time: String(i) })
     }
@@ -473,10 +538,22 @@ describe('notificationQueue', () => {
   })
 
   it('peek reads without clearing', () => {
-    notificationQueue.drain()
     notificationQueue.enqueue({ type: 'message.received', groupId: 'g', time: 't' })
     expect(notificationQueue.peek()).toHaveLength(1)
     expect(notificationQueue.size).toBe(1)
-    notificationQueue.drain()
+  })
+
+  it('drainByGroup removes only the matched group and keeps others in place', () => {
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g1', taskId: 't1', status: 'done', time: 'a' })
+    notificationQueue.enqueue({ type: 'task.completed', groupId: 'g2', taskId: 't2', status: 'done', time: 'b' })
+    notificationQueue.enqueue({ type: 'task.failed', groupId: 'g1', taskId: 't3', status: 'failed', time: 'c' })
+    const matched = notificationQueue.drainByGroup('g1')
+    expect(matched.map(n => n.taskId)).toEqual(['t1', 't3'])
+    expect(notificationQueue.peek().map(n => n.taskId)).toEqual(['t2'])
   })
 })
+
+/** Placeholder to satisfy the clientStub import pattern used previously. */
+function clientStub(): CoAgentHubClient {
+  return {} as CoAgentHubClient
+}
