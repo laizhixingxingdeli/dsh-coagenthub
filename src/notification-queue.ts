@@ -33,6 +33,12 @@ export interface CoAgentHubNotification {
   dispatcherSessionId?: string
   /** 下发者 participant id(dispatcherSessionId 缺失/找不到时的兜底路由键)。 */
   dispatcherParticipantId?: string
+  /**
+   * Durable completion-event id (from CoAgentHub core inbox). Present when the
+   * notification originates from a claimed completion event; used to dedupe
+   * followup across ack retries and restarts.
+   */
+  eventId?: string
   /** ISO 8601 timestamp of the event. */
   time: string
 }

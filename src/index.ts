@@ -5,11 +5,14 @@
  * @module @laizhixingxingdeli/dsh-coagenthub
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CoAgentHubClient } from './client.ts'
 import type { CoAgentHubSettings } from './config.ts'
 import { getCoAgentHubSettingsStore } from './config.ts'
+import { CompletionConsumer } from './completion-consumer.ts'
+import { DedupeStore } from './dedupe-store.ts'
 import { DshAgentPushAdapter, NullPushAdapter, createNotificationDeliverer } from './notify.ts'
 import { TaskWatcher } from './task-watcher.ts'
 import { registerCoAgentHubTools } from './tools.ts'
@@ -135,6 +138,19 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
   let agentsRegistry: { roots(): Agent[]; list(): Agent[] } | undefined
   // 通知 deliverer 起步为队列回退;agents 服务可用后动态切到主动推送。
   const deliverer = createNotificationDeliverer(nullAdapter())
+
+  // Durable completion consumer 身份:稳定、非 secret 的本地 consumerId(插件实例
+  // 生命周期内不变),用于 claim/ack/fail。dedupe store 保证 at-most-one followup。
+  const consumerId = `dsh-coagenthub-${randomUUID()}`
+  const dedupe = new DedupeStore()
+  const consumer = new CompletionConsumer({
+    client,
+    consumerId,
+    participantId: client.participantId ?? '',
+    deliverer,
+    dedupe,
+    log,
+  })
   // 会话→群反查缓存(推送隔离用),按插件实例隔离。TTL 后既不读也不保留:
   // 填充新条目时顺带驱逐过期条目,避免会话/设置变化产生的 key 无限累积。
   const sessionGroupCache = new Map<string, SessionGroupCacheEntry>()
@@ -273,6 +289,7 @@ export function apply(ctx: Context, config: CoAgentHubPluginConfig = {}): void {
     client,
     ws,
     deliver: deliverer,
+    consumer,
   })
   ctx.effect(
     () => {

@@ -155,6 +155,46 @@ export interface Executor {
   online?: boolean | null
 }
 
+/**
+ * Standard completion-event envelope (schemaVersion=1). Read at claim/list time
+ * so `diffSummary` / `outputTail` are always fresh from the task row. `task`
+ * carries the routed event data; `state` / `attempts` / `nextAttemptAt` are the
+ * delivery state (only present on inbox-list items, not on claim responses).
+ */
+export interface CompletionEventEnvelope {
+  schemaVersion: 1
+  type: 'coagenthub.task.completed'
+  eventId: string
+  dispatcherParticipantId: string | null
+  dispatcherSessionId: string | null
+  callbackRef: Record<string, unknown> | null
+  task: {
+    groupId: string
+    taskId: string
+    status: string | null
+    specRef: string | null
+    specHash: string | null
+    diffSummary: unknown
+    outputTail: unknown
+  }
+}
+
+/** One inbox-list item = standard envelope + delivery state. */
+export interface CompletionInboxItem extends CompletionEventEnvelope {
+  state: string
+  attempts: number
+  nextAttemptAt: string | null
+}
+
+export interface CompletionInboxList {
+  events: CompletionInboxItem[]
+}
+
+export interface ClaimResult {
+  leaseToken: string
+  event: CompletionEventEnvelope
+}
+
 /** HTTP-level failure carrying the status code and a response body summary. */
 export class CoAgentHubError extends Error {
   readonly status: number
@@ -356,5 +396,74 @@ export class CoAgentHubClient {
   async getParticipantByName(name: string): Promise<Participant | undefined> {
     const participants = await this.listParticipants()
     return participants.find(participant => participant.name === name)
+  }
+
+  /**
+   * List pending / retriable / lease-expired completion events for the
+   * participant (GET /participants/:id/task-completion-events). `after` is an
+   * event-id cursor; `limit` caps at 100 server-side.
+   */
+  listCompletionEvents(participantId: string, after?: string, limit?: number): Promise<CompletionInboxList> {
+    const params = new URLSearchParams()
+    if (after !== undefined) params.set('after', after)
+    if (limit !== undefined) params.set('limit', String(limit))
+    const query = params.size > 0 ? `?${params.toString()}` : ''
+    return this.request<CompletionInboxList>(
+      `/participants/${encodeURIComponent(participantId)}/task-completion-events${query}`,
+    )
+  }
+
+  /**
+   * Atomically claim one completion event (lease). Body carries the stable
+   * local `consumerId` and requested `leaseMs`; returns a `leaseToken` that must
+   * be presented to ack/fail. 409 means not claimable (already leased/delivered).
+   */
+  claimCompletionEvent(participantId: string, eventId: string, consumerId: string, leaseMs: number): Promise<ClaimResult> {
+    return this.request<ClaimResult>(
+      `/participants/${encodeURIComponent(participantId)}/task-completion-events/${encodeURIComponent(eventId)}/claim`,
+      { method: 'POST', body: JSON.stringify({ consumerId, leaseMs }) },
+    )
+  }
+
+  /**
+   * Acknowledge a claimed event as delivered (state → delivered). Idempotent for
+   * the same `leaseToken`. 409 means token mismatch or event not found.
+   */
+  ackCompletionEvent(participantId: string, eventId: string, leaseToken: string): Promise<{ success: boolean; eventId: string }> {
+    return this.request<{ success: boolean; eventId: string }>(
+      `/participants/${encodeURIComponent(participantId)}/task-completion-events/${encodeURIComponent(eventId)}/ack`,
+      { method: 'POST', body: JSON.stringify({ leaseToken }) },
+    )
+  }
+
+  /**
+   * Record a delivery failure for a claimed event: increments attempts, sets
+   * `retryAfterMs`; exceeds the server's max attempts (default 10) → dead.
+   * 409 means token mismatch or event not found.
+   */
+  failCompletionEvent(
+    participantId: string,
+    eventId: string,
+    leaseToken: string,
+    error?: string,
+    retryAfterMs?: number,
+  ): Promise<{ success: boolean; eventId: string; attempts: number; state: string; nextAttemptAt: string | null }> {
+    return this.request<{
+      success: boolean
+      eventId: string
+      attempts: number
+      state: string
+      nextAttemptAt: string | null
+    }>(
+      `/participants/${encodeURIComponent(participantId)}/task-completion-events/${encodeURIComponent(eventId)}/fail`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          leaseToken,
+          ...(error !== undefined ? { error } : {}),
+          ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+        }),
+      },
+    )
   }
 }
