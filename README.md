@@ -1,7 +1,7 @@
 # dsh-coagenthub
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
-[![Version](https://img.shields.io/badge/version-0.0.20-2ea44f.svg)](https://github.com/laizhixingxingdeli/dsh-coagenthub)
+[![Version](https://img.shields.io/badge/version-0.0.23-2ea44f.svg)](https://github.com/laizhixingxingdeli/dsh-coagenthub)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/laizhixingxingdeli/dsh-coagenthub/issues)
 
 DeepSeek Harness(`dsh`)插件:把 [CoAgentHub](https://github.com/laizhixingxingdeli/CoAgentHub)
@@ -20,12 +20,16 @@ CoAgentHub(列参与者 / 建群 / 发消息 / 下发任务 / 查任务),浏览�
   执行器 / 通知,agent 全程可追溯(见[工具清单](#工具清单))。
 - **结构化任务书** — `coagenthub_dispatch_task` 支持 `goal / scope / acceptance /
   tests / report / priority / dependencies` 结构化字段,自动渲染成 Markdown 任务书;
-  只传 `body` 时原样发送,完全兼容。
-- **groupId 自动回填** — 工具不必每次传 `groupId`:显式传值优先,否则按当前会话
-  cwd 反查匹配群,再回落面板选中的活动群(activeGroupId)。
-- **后台任务事件推送** — WS 订阅 + 低频轮询兜底;dsh 运行时可用时通过
-  `agent.followup` 主动唤醒会话,否则通知入队由 `coagenthub_get_notifications` 补读,
-  通知不丢、按会话隔离。
+  只传 `body` 时原样发送,完全兼容。另支持 `commitMode`(追加 `## CommitMode: none`
+  避免只读/发布类任务被弱验收误判)、`specRef` / `specHash`(Spec-Driven 关联规范)
+  与 `planOnly`(只渲染任务书预览,不下发)。
+- **groupId 自动回填** — 工具不必每次传 `groupId`:显式传值优先,否则按当前会话的
+  per-session 工作区映射(面板按会话保存,须在群列表)确定,其次按会话 cwd 反查匹配群;
+  有会话 id 时绝不回退全局 activeGroupId,无会话 id 才以它兜底。
+- **后台任务事件推送(durable inbox)** — 任务终态由服务端 durable completion
+  inbox 承载;`task_completion_available` 轻量提示帧 + 30s 兜底定时器触发消费,
+  dsh 运行时可用时经 `agent.followup` 主动唤醒下发会话,否则通知入队由
+  `coagenthub_get_notifications` 补读;dedupe 保证 at-most-one followup,通知不丢、按会话隔离。
 - **浏览器指挥台面板** — dsh web 右上角悬浮面板:群列表 / 任务 / 执行器 / 设置四 Tab,
   可拖动、可调大小,位置与大小记忆;任务行展示状态徽章、attempt 时间线、输出 tail,
   15s 自动刷新 running 任务,新 Tab 打开完整原始输出。
@@ -97,28 +101,33 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
 ### 设置持久化路径
 
 面板「设置」里保存的 `apiBase` / `participantId` / `mappingRule` / `activeGroupId`
-由 host 半写入磁盘,重启 dsh web 后自动恢复,路径规则:
+以及按会话记忆的 `sessionActiveGroups`(key=sessionId,value=groupId)由 host 半写入
+磁盘,重启 dsh web 后自动恢复,路径规则:
 
 | 环境变量 | 持久化文件 |
 | --- | --- |
 | `DSH_HOME` 已设置(旧版路径,优先) | `$DSH_HOME/coagenthub-config.json` |
 | `DSH_HOME` 未设置或为空 | `~/.dsh/coagenthub-config.json`(Windows 常见,默认落盘于此) |
 
+后台事件去重由 `DedupeStore` 持久化到同目录的 `coagenthub-dedupe.json`
+(`$DSH_HOME` 已设置时用 `$DSH_HOME/`,否则 `~/.dsh/`),容量默认 1000,FIFO 淘汰最旧。
+
 写/读失败不阻塞:设置保留在内存继续生效,下次启动再从磁盘尽力恢复(失败则回落内存)。
 
 ## 工具清单
 
 共 **18 个工具**(`src/tools.ts`)。`groupId` 大多可选:不传时自动回填
-(当前会话 cwd 反查匹配群 → activeGroupId 兜底 → 都找不到则报错提示手动传)。
+(当前会话 per-session 映射(须在群列表)→ 会话 cwd 反查 → 无会话 id 时全局
+activeGroupId 兜底 → 都找不到则报错提示手动传)。
 
 | 工具 | 参数 | 说明 |
 | --- | --- | --- |
 | `coagenthub_list_participants` | — | 列出参与者(id/name/type/device/online/lastSeen;name 含「执行器」→ `executor`,「Local User」→ `local`) |
 | `coagenthub_create_group` | `title` | 建群,返回 id/title/status |
 | `coagenthub_post_message` | `groupId?`、`body`、`audience?`(默认 broadcast)、`audienceRef?` | 群消息 |
-| `coagenthub_dispatch_task` | `groupId?`、`body`、`executorName?`(默认 AtomCode)、`goal?/scope?/acceptance?/tests?/report?/priority?/dependencies?` | 找名字含 executorName 的参与者,发定向消息触发任务;结构化字段渲染成 Markdown 任务书(只传 body 时原样发送);返回 messageId + 执行器 id/name;403 提示无权限 |
+| `coagenthub_dispatch_task` | `groupId?`、`body`、`executorName?`(默认 AtomCode)、`commitMode?`(auto/none/default)、`planOnly?`(默认 false)、`specRef?`、`specHash?`、`goal?/scope?/acceptance?/tests?/report?/priority?/dependencies?` | 找名字含 executorName 的参与者,发定向消息触发任务;结构化字段渲染成 Markdown 任务书(只传 body 时原样发送);`commitMode` 控制是否追加「## CommitMode: none」(auto 按任务内容保守判断,none 强制追加,default 不追加),避免只读/发布/纯 API 类任务被弱验收误判;`specRef`/`specHash` 关联规范(Spec-Driven);`planOnly` 只渲染任务书预览不下发;返回 messageId + 执行器 id/name;403 无权限 |
 | `coagenthub_list_tasks` | `groupId?` | 任务列表(id/status/executor 名/summary 前 200 字/时间) |
-| `coagenthub_get_task` | `groupId?`、`taskId` | 单个任务(id/status/executor/brief/retryCount/attempts/diffSummary/outputTail);404 时提示「messageId ≠ taskId」误用 |
+| `coagenthub_get_task` | `groupId?`、`taskId` | 单个任务(id/status/executorParticipantId/executorName/brief/createdAt/updatedAt/retryCount/attempts/diffSummary/outputTail);404 时提示「messageId ≠ taskId」误用 |
 | `coagenthub_update_task` | `groupId?`、`taskId`、`brief` | 修改任务书(仅排队中的任务可改;409/403 错误信息透出) |
 | `coagenthub_list_groups` | `limit?`(默认 100)、`status?`(`active`/`archived`) | 群列表(id/title/status/projectPath;带 status 过滤时先全量过滤再截断) |
 | `coagenthub_get_group` | `groupId?` | 单个群(id/title/status/projectPath/members) |
@@ -142,12 +151,15 @@ dsh web --patch /path/to/dsh-coagenthub/cordis.yml
 
 ## 浏览器面板(指挥台)
 
-dsh web 页面右上角悬浮一个 **CoAgentHub 面板**(`shell.overlay` seat,320px),四 Tab:
-「群列表 | 任务 | 执行器 | 设置」。
+dsh web 页面右上角悬浮一个 **CoAgentHub 面板**(`shell.overlay` seat,默认 360×620,可调
+280–640 / 320–900),四 Tab:「群列表 | 任务 | 执行器 | 设置」。
 
 - **面板外壳**:拖动标题栏可移动面板,位置存 `localStorage`(`coagenthub.panelPosition`,
-  默认右上角,刷新后恢复,移动时至少保留 48px 在视口内);右下角拖拽手柄可调大小
-  (`coagenthub.panelSize`)。
+  默认右上角,拖动时至少保留 48px 在视口内,刷新后按当前视口重新夹紧);右下角拖拽
+  手柄可调大小(`coagenthub.panelSize`)。
+- **当前工作区栏**:标题栏下方一个下拉,列出已绑定的虚拟工作区群;默认「自动(按 cwd)」,
+  选择后需点「保存」才写入当前 dsh 会话的 per-session 记忆并镜像 host
+  (agent 侧工具按会话 id 读取);自动映射仅 Windows 支持。
 - **群列表 Tab**:群列表 + 状态,点击行复制群 id。
 - **任务 Tab**:顶部下拉选群(复用群列表数据),下方展示该群任务:状态徽章(排队中=黄、
   执行中=绿点脉冲、已完成=绿、失败=红、已取消=灰)、执行器、摘要(前 60 字)、相对时间;
@@ -179,25 +191,43 @@ node scripts/build-client.mjs   # 产出 lib/client.js(dsh web 启动时加载)
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/client.ts` | 纯 HTTP 客户端(不读本地文件、不做业务判断);apiBase/participantId 解析链:设置 > config > 环境变量 > 默认;`getTask` 优先单查端点,404/405 回落 `listTasks` 过滤 |
-| `src/tools.ts` | 薄工具层:参数校验 + 调 client + 格式化输出;18 个工具;`resolveGroupId` 统一做 groupId 自动回填(显式 → 会话 cwd 反查 → activeGroupId) |
-| `src/task-book.ts` | 纯函数 `buildTaskBook`:把 `dispatch_task` 的结构化字段(goal/scope/acceptance/tests/report/priority/dependencies)渲染成 Markdown 任务书;无结构化字段时原样透传 body |
+| `src/client.ts` | 纯 HTTP 客户端(不读本地文件、不做业务判断);apiBase/participantId 解析链:设置 > config > 环境变量 > 默认;`getTask` 优先单查端点,404/405 回落 `listTasks` 过滤;另提供 durable completion inbox 的 list / claim / ack / fail 方法 |
+| `src/tools.ts` | 薄工具层:参数校验 + 调 client + 格式化输出;18 个工具;`resolveGroupId` 统一做 groupId 自动回填(显式 → 当前会话 per-session 映射(须在群列表)→ 会话 cwd 反查;有 sessionId 时绝不回退全局 activeGroupId,无会话 id 才以它兜底) |
+| `src/task-book.ts` | 纯函数 `buildTaskBook`:把 `dispatch_task` 的结构化字段(goal/scope/acceptance/tests/report/priority/dependencies + planOnly 时的 specRef/specHash)渲染成 Markdown 任务书;`commitMode`(auto/none/default)控制是否追加 `## CommitMode: none`;无结构化字段时原样透传 body |
+| `src/completion-consumer.ts` | durable completion inbox 消费(host):每轮 list pending → claim(lease,默认 30s)→ 转通知 → followup → dedupe 记录 eventId → ack;投递失败 fail 回服务端保持可重试,绝不静默 ack;单批有界(batchLimit 默认 10) |
+| `src/dedupe-store.ts` | 有界持久化 dedupe(容量默认 1000):记录已 followup 的 eventId 落盘 `coagenthub-dedupe.json`(`$DSH_HOME` 或 `~/.dsh/`),保证 at-most-one followup(跨 ack 重试与重启) |
+| `src/task-watcher.ts` | 后台事件监测:`handleFrame` 仅响应 `task_completion_available`(立即消费 inbox 的低延迟路径)与 `task_stall_alert`(直接投递非终态通知),其余帧忽略;30s 兜底定时器(DEFAULT_CONSUME_INTERVAL_MS)每轮刷新 WS 身份并消费 inbox;启动即消费一次恢复停机期间事件 |
+| `src/notification-queue.ts` | 内存通知队列(FIFO,容量 200):task.completed / task.failed / task.stalled / task.status_changed / message.received |
 | `src/workspace-instructions.ts` | 会话 cwd 解析(`agent.session.header.cwd`,旧结构 `meta.cwd`,live root agent 回退;**不回退 process.cwd()**)+ 读取工作区根目录 `COAGENTHUB.md` |
 | `src/workspace.ts` | 虚拟工作区 host 逻辑:Mac→Win 路径映射 / 前缀推断 / net use 参数 / 一键设置 / 状态;纯函数与 IO 分离,全部可单测 |
-| `src/config.ts` | 运行时设置(apiBase / participantId / mappingRule / activeGroupId),host 半持久化到 `$DSH_HOME`(或 `~/.dsh`) |
-| `src/ws-client.ts` | Node 侧 WebSocket 客户端:`<apiBase>/ws?participantId=<id>`,指数退避重连 1s→30s,身份变化自动重连 |
-| `src/task-watcher.ts` | 后台任务状态监测:订阅 `group_message` / `task_output` / `task_stall_alert` / `task_status_changed` 帧 + 低频轮询(4s)兜底,检测 queued→running→done/failed 变化;事件不做群过滤,隔离在 drain 时按会话 cwd 进行 |
-| `src/notification-queue.ts` | 内存通知队列(容量 200):task.completed / task.failed / task.stalled / task.status_changed / message.received |
-| `src/notify.ts` | 通知投递适配层:`PushAdapter` 抽象 + `DshAgentPushAdapter`(dsh `agent.followup` 排队 next-turn 消息并唤醒 driver)/ `NullPushAdapter`(回退入队 + 日志说明);deliverer 推送失败自动回落队列 |
-| `src/proxy.ts` | host 半同源代理(web-only):`/coagenthub-api/*` 转发到 CoAgentHub + 设置端点(`/coagenthub-api-config`)+ 原始输出端点(`/coagenthub-api/raw/<taskId>`)+ 虚拟工作区端点(`workspace-setup` / `workspace-status`);headless profile 无 `webServer` 时自动跳过 |
-| `src/client-ui/*` | 浏览器半四 Tab 面板(群列表/任务/执行器/设置 + 虚拟工作区 + 可拖动外壳),不实现 agent 工具 |
+| `src/config.ts` | 运行时设置(apiBase / participantId / mappingRule / activeGroupId / sessionActiveGroups),host 半持久化到 `$DSH_HOME`(或 `~/.dsh/`)coagenthub-config.json |
+| `src/ws-client.ts` | Node 侧 WebSocket 客户端:`<apiBase>/ws?participantId=<id>`,指数退避重连 1s→30s,身份/地址变化自动重连 |
+| `src/notify.ts` | 通知投递适配层:`PushAdapter` 抽象 + `DshAgentPushAdapter`(三层路由:①dispatcherSessionId 定向 → ②dispatcherParticipantId+groupId 兜底 → ③会话 cwd 群过滤,全部落空才入队)/ `NullPushAdapter`(入队回退);deliverer 推送失败自动回落队列 |
+| `src/proxy.ts` | host 半同源代理(web-only):`/coagenthub-api/*` 转发到 CoAgentHub + 设置端点(`/coagenthub-api-config`,GET/PUT)+ 原始输出端点(`/coagenthub-api/raw/<taskId>`)+ 虚拟工作区端点(`workspace-setup` / `workspace-status`);headless profile 无 `webServer` 时自动跳过 |
+| `src/client-ui/*` | 浏览器半四 Tab 面板(群列表/任务/执行器/设置 + 当前工作区栏 + 可拖动外壳),不实现 agent 工具 |
 | `COAGENTHUB.md` | 插件工作区常驻指令,`coagenthub_get_workspace_instructions` / `coagenthub_get_active_group` 读取 |
 
-后台事件链路(B 方案):`TaskWatcher` 接 WS 帧并做低频轮询兜底 → `notify.ts` 适配层:
-运行时暴露 `ctx.agents` 注册表时用 `DshAgentPushAdapter` 主动唤醒 dsh 会话
-(`agent.followup` 排队 next-turn 消息,plugin 来源;推送前按会话 cwd 反查群做隔离),
-否则回落 `NullPushAdapter` 入队;`coagenthub_get_notifications` 始终可补读,替代轮询
-查任务状态。
+后台事件链路(durable inbox 模型):任务终态由 CoAgentHub core 的 durable completion
+inbox 承载(可靠性来源是数据库,不是 WS)。`TaskWatcher` 只做两件事:①收到
+`task_completion_available` 轻量提示帧时立即触发一次 `CompletionConsumer.consume()`
+(低延迟路径);②每 30s(`DEFAULT_CONSUME_INTERVAL_MS`)兜底消费一次,覆盖 WS 丢帧 /
+重连场景,并在启动瞬间立刻消费一次以恢复插件重启期间的终态事件。非终态的
+`task_stall_alert` 帧仍走 WS 直接投递,不进 inbox。
+
+`CompletionConsumer.consume()` 每次跑一个「list pending → claim(lease,默认 30s,并发/
+重入由服务端 lease 保证)→ 转成通知 → followup → 记录 eventId 到 dedupe → ack」的闭环,
+单批有界(默认 10)。任何投递失败(无 live agent / followup 抛错 / 注册表缺失)都把事件
+fail 回服务端(默认 `retryAfter 60s`)保持可重试,绝不静默 ack。`DedupeStore`
+(`coagenthub-dedupe.json`,容量 1000)在 followup 成功后、ack 前记录 eventId,保证
+at-most-one followup——ack 失败或插件重启只重试 ack,不重复唤醒会话。
+
+通知投递由 `notify.ts` 的 `DshAgentPushAdapter` 负责,三层路由保证「下发者必收」:
+①通知带 `dispatcherSessionId` 时按会话 id 定向到对应 live agent 并 followup(群过滤
+不参与,下发会话即权威目标);②缺失 / 找不到时按 `dispatcherParticipantId` + groupId
+兜底——只有本实例身份与下发者 participant 一致、且该 participant 归属群等于通知群
+的会话才接收;③再回落群级 cwd 过滤(当前会话 cwd 反查群,相等才推送)。全部落空或
+推送抛错时下落队列。`coagenthub_dispatch_task` 下发时把当前会话 `sessionId` 经消息
+`metadata.dispatcherSessionId` 透传给服务端,回显到任务 / 完成事件上,供①路由使用。
 
 ### 主动推送支持状态(已通过 agent.followup 实现真正唤醒)
 
@@ -326,6 +356,27 @@ dsh 的工作区是**运行 dsh 的机器本地目录**。Windows 的 dsh 无需
 > (`prepublishOnly` 会自动执行 `pnpm build && node scripts/build-client.mjs`)
 
 ## 变更记录
+
+### 0.0.23
+
+- 后台任务事件改为 **durable inbox 模型**:`CompletionConsumer` 消费 core 的 completion
+  inbox(list → claim → followup → dedupe 记录 → ack/fail),`TaskWatcher` 仅响应
+  `task_completion_available` 提示帧 + 30s 兜底消费;`DedupeStore`
+  (`coagenthub-dedupe.json`,容量 1000)保证 at-most-one followup
+- 通知主动推送新增**下发者必收**三层路由:`dispatcherSessionId` 定向 →
+  `dispatcherParticipantId`+groupId 兜底 → 会话 cwd 群过滤;`dispatch_task` 经消息
+  `metadata.dispatcherSessionId` 透传下发者会话 id
+
+### 0.0.22
+
+- `coagenthub_dispatch_task` 新增 `commitMode`(auto/none/default,控制追加
+  `## CommitMode: none` 避免只读/发布类任务被弱验收误判)与 `planOnly`(只渲染任务书
+  预览不下发)
+
+### 0.0.21
+
+- `coagenthub_dispatch_task` 新增 Spec-Driven 支持:`specRef` / `specHash` 关联规范
+  文档(服务端在任务书中插入「关联规范」段);`planOnly` 预览时客户端也渲染该段
 
 ### 0.0.20
 
